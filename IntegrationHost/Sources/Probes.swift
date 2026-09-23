@@ -13,8 +13,11 @@ struct Probes: Sendable {
     var service: BookmarkService { BookmarkService(engine: engine) }
 
     /// Question 1: does the system start access for this grant, and what does another start return?
-    func systemStart(for grant: Grant) -> [ProbeResult] {
-        let name = "Start state of \(grant.origin.rawValue) URL"
+    ///
+    /// For a grant whose origin claims no start, the last step is still one stop: whether the
+    /// URL is readable after it tells whether the system had started access after all.
+    func systemStart(for grant: Grant, named label: String? = nil) -> [ProbeResult] {
+        let name = label ?? "Start state of \(grant.origin.rawValue) URL"
         var observations = [ProbeResult(probe: name, detail: "Readable before any start: \(canRead(grant.url))")]
         let started = engine.startAccessing(grant.url)
         observations.append(ProbeResult(probe: name, detail: "startAccessing returned \(started)"))

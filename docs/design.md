@@ -389,6 +389,7 @@ Validators return typed refusals; the app supplies the copy.
 4. Does a read-only app with `.securityScopeAllowOnlyReadAccess` create scoped bookmarks?
 5. Does an atomic save next to a file-scoped bookmark need the parent's scope?
 6. iOS: does an app extension resolve a regular bookmark created by its host app through an app group?
+7. Does the system start access for a folder an `NSItemProvider` hands over in place (`.onDrop` with `loadInPlaceFileRepresentation`)? No `Grant.Origin` covers it yet.
 
 The answers feed back into `Grant` intake and the fake engine, so unit tests stay accurate.
 

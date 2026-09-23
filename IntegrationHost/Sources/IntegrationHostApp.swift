@@ -2,6 +2,7 @@ import AppKit
 import Bookmarks
 import BookmarksUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct IntegrationHostApp: App {
@@ -67,6 +68,27 @@ final class ProbeModel {
             record(probes.systemStart(for: grant))
         }
     }
+
+    /// Question 7: does the system start access for a folder that an `NSItemProvider` hands
+    /// over in place, as `.onDrop` with `loadInPlaceFileRepresentation` does?
+    ///
+    /// The URL is probed after a hop to the main actor, as the app uses it. The grant claims
+    /// no start, so the probe's last stop is one the app would owe if the system started it.
+    func probeInPlaceDrop(_ providers: [NSItemProvider]) {
+        let name = "In-place item provider drop"
+        for provider in providers {
+            _ = provider.loadInPlaceFileRepresentation(forTypeIdentifier: UTType.folder.identifier) { url, isInPlace, error in
+                Task { @MainActor in
+                    guard let url else {
+                        self.record([ProbeResult(probe: name, detail: "No URL: \(String(describing: error))")])
+                        return
+                    }
+                    self.record([ProbeResult(probe: name, detail: "isInPlace: \(isInPlace)")])
+                    self.record(self.probes.systemStart(for: Grant(url: url, origin: .alreadyAccessible), named: name))
+                }
+            }
+        }
+    }
 }
 
 struct ProbeView: View {
@@ -77,6 +99,13 @@ struct ProbeView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Each button answers one question from docs/design.md §11. Drop a folder anywhere to probe drops, or open one with the app from the Finder.")
                 .foregroundStyle(.secondary)
+            Text("7. Drop a folder here to probe an in-place item provider drop")
+                .frame(maxWidth: .infinity, minHeight: 56)
+                .background(.quaternary, in: .rect(cornerRadius: 8))
+                .onDrop(of: [.folder], isTargeted: nil) { providers in
+                    model.probeInPlaceDrop(providers)
+                    return true
+                }
             HStack {
                 Button("1. Panel start state") {
                     Task { await model.pickWithPanel(files: false) { probes, grant in probes.systemStart(for: grant) } }
