@@ -102,6 +102,8 @@ public struct MigratingPersistence<Base: BookmarkPersistence>: BookmarkPersisten
         try base.save(records)
     }
 
+    public var storesRecordState: Bool { base.storesRecordState }
+
     public func update(
         _ transform: ([BookmarkRecord<Key, Metadata>]) -> [BookmarkRecord<Key, Metadata>]?
     ) throws(PersistenceError) {

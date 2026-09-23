@@ -59,7 +59,7 @@ if resolved.needsPersisting { save(resolved.data) }
 let lease = resolved.beginAccess()
 ```
 
-Or conform your existing store to `BookmarkPersistence` and keep its format byte for byte. `MigratingPersistence` imports legacy records once.
+Or conform your existing store to `BookmarkPersistence` and keep its format byte for byte. If the format has no room for a record's status, identity or dates, return `false` from `storesRecordState` and the store keeps them in memory. `MigratingPersistence` imports legacy records once.
 
 `JSONFilePersistence` can be shared between processes, such as an app and its extensions in an app group: every change is read, merged and written in one coordinated step, and `Task { await store.reload(on: persistence.changes()) }` keeps a store current with what the others save.
 

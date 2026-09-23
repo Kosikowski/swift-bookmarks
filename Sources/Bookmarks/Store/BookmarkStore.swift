@@ -17,6 +17,9 @@ import Synchronization
 /// a store can share its persistence with another process. Changes the other process makes
 /// reach this store, and its ``updates(bufferingPolicy:)`` subscribers, with the next change
 /// or ``reload()``.
+///
+/// A persistence for a format that can't hold a record's status, identity, path or dates says
+/// so with ``BookmarkPersistence/storesRecordState``, and the store keeps them in memory.
 public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equatable> {
     public typealias Record = BookmarkRecord<Key, Metadata>
     public typealias Failure = BookmarkStoreError<Key>
@@ -28,6 +31,9 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     public nonisolated let kind: BookmarkKind
     /// How the store behaves.
     public nonisolated let policy: StorePolicy
+    /// Checks that depend on the key an item is stored under, run with the policy's
+    /// ``StorePolicy/validators`` whenever an item is added or re-granted.
+    public nonisolated let validatorsForKey: @Sendable (Key) -> [any GrantValidator]
     nonisolated let registry: AccessRegistry<Key>
 
     private let persistence: any BookmarkPersistence<Key, Metadata>
@@ -56,12 +62,16 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     ///   - persistence: Where records are loaded from and saved to.
     ///   - kind: The kind of new bookmarks. Defaults to the environment's persistent default.
     ///   - policy: How the store behaves.
+    ///   - validatorsForKey: Checks for the item stored under a given key, such as
+    ///     ``GrantValidator/covers(_:)`` for a key that names the folder it must cover. They
+    ///     run after the policy's validators, on `add` and on `regrant` alike.
     ///   - service: The bookmark service.
     ///   - now: The clock used for record dates.
     public init(
         persistence: some BookmarkPersistence<Key, Metadata>,
         kind: BookmarkKind? = nil,
         policy: StorePolicy = .default,
+        validatorsForKey: @escaping @Sendable (Key) -> [any GrantValidator] = { _ in [] },
         service: BookmarkService = BookmarkService(),
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -69,6 +79,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         self.service = service
         self.kind = kind ?? service.defaultKind
         self.policy = policy
+        self.validatorsForKey = validatorsForKey
         self.now = now
         registry = AccessRegistry(engine: service.engine, ledger: service.ledger)
     }
@@ -110,7 +121,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             case .failure(let error): throw .persistence(error)
             }
             let old = table
-            table.replaceAll(with: records)
+            table.replaceAll(with: records, keepingKnownState: !persistence.storesRecordState)
             let (changes, invalidated) = table.takeChanges(since: old)
             finish(changes, invalidating: invalidated)
         }
@@ -205,7 +216,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
 
     private func adding(_ grant: Grant, key: Key, metadata: Metadata) async throws(Failure) -> (record: Record, resolved: ResolvedBookmark) {
         let context = try await prepare(grant, excluding: key)
-        let resolved = try await adopt(grant, context: context)
+        let resolved = try await adopt(grant, for: key, context: context)
         let record = try await insert(
             Item(data: resolved.data, kind: kind, location: resolved.handle.path, identity: resolved.fileIdentity, status: .available),
             key: key,
@@ -302,7 +313,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             service.relinquish(grant)
             throw .notFound(key)
         }
-        let resolved = try await adopt(grant, context: context)
+        let resolved = try await adopt(grant, for: key, context: context)
         let location = resolved.handle.path
         if policy.requiresSameItemOnRegrant, !Self.isSameItem(resolved, at: location, as: existing) {
             throw .differentItem(key)
@@ -497,9 +508,9 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         resolutions.filter { $0.key.key == key }.values.reduce(0) { $0 + $1.callers }
     }
 
-    private func adopt(_ grant: Grant, context: ValidationContext) async throws(Failure) -> ResolvedBookmark {
+    private func adopt(_ grant: Grant, for key: Key, context: ValidationContext) async throws(Failure) -> ResolvedBookmark {
         do {
-            return try await service.adopt(grant, kind: kind, validators: policy.validators, context: context)
+            return try await service.adopt(grant, kind: kind, validators: policy.validators + validatorsForKey(key), context: context)
         } catch {
             throw .bookmark(error)
         }
@@ -575,6 +586,10 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
 
     private func commit(_ failure: BookmarkFailure, for snapshot: Table.Snapshot) async {
         let dropping = policy.failureHandling.drops(failure)
+        // A record that changed since it was read isn't marked, and one already marked with
+        // this failure has nothing to save, so a record that keeps failing costs a resolution
+        // but no read or write of the persistence.
+        guard table.isCurrent(snapshot), dropping || table[snapshot.key]?.status.failure != failure else { return }
         let timestamp = now()
         do {
             try await mutate { table throws(Failure) in
@@ -674,18 +689,23 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         _ body: @escaping @Sendable (inout Table) throws(Failure) -> T
     ) async throws(Failure) -> (T, Table) {
         let persistence = persistence
+        let keepsKnownState = !persistence.storesRecordState
         let outcome: Result<(T, Table), Failure>
         do {
             outcome = try await persistenceExecutor.perform { () throws(PersistenceError) -> Result<(T, Table), Failure> in
                 var outcome: Result<(T, Table), Failure>?
                 try persistence.update { stored in
                     var draft = base
-                    draft.replaceAll(with: stored)
+                    draft.replaceAll(with: stored, keepingKnownState: keepsKnownState)
+                    // What is stored, as far as this store knows it. Where the persistence
+                    // can't hold state, that includes the state kept in memory, so a change
+                    // that leaves the records as they were saves nothing.
+                    let current = keepsKnownState ? draft.orderedRecords : stored
                     do throws(Failure) {
                         let result = try body(&draft)
                         outcome = .success((result, draft))
                         let records = draft.orderedRecords
-                        return records.elementsEqual(stored, by: Table.sameRecord) ? nil : records
+                        return records.elementsEqual(current, by: Table.sameRecord) ? nil : records
                     } catch {
                         outcome = .failure(error)
                         return nil

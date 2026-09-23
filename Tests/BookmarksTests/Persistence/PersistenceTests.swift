@@ -889,6 +889,14 @@ struct MigratingPersistenceTests {
         #expect(counter.value == 1)
     }
 
+    @Test(arguments: [true, false])
+    func storesRecordStateWhenItsBaseDoes(_ storesRecordState: Bool) {
+        let base = ScriptedPersistence<String, Tag>(storesRecordState: storesRecordState)
+        let migrating = MigratingPersistence(base: base, marker: Flag().marker, legacy: { nil })
+
+        #expect(migrating.storesRecordState == storesRecordState)
+    }
+
     @Test func completedMigrationsDoNotResurrectDeletedRecords() throws {
         let flag = Flag()
         let migrating = MigratingPersistence(base: InMemoryPersistence<String, Tag>(), marker: flag.marker, legacy: { sampleRecords() })

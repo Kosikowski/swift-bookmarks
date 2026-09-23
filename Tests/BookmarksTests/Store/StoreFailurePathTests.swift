@@ -32,6 +32,19 @@ struct StoreFailurePathTests {
         #expect(try await harness.store.record("a")?.status == .available)
     }
 
+    @Test func aRecordThatKeepsFailingIsNotWrittenAgain() async throws {
+        let harness = StoreHarness()
+        try await harness.add("a", "/Users/me/A")
+        harness.engine.failResolution(of: "/Users/me/A", with: FakeErrors.corrupt)
+        await #expect(throws: TestStore.Failure.self) { try await harness.store.lease("a") }
+        let updates = harness.persistence.updateCount
+
+        await #expect(throws: TestStore.Failure.self) { try await harness.store.lease("a") }
+
+        #expect(harness.persistence.updateCount == updates)
+        #expect(harness.saved.first?.status.failure == .needsRegrant)
+    }
+
     @Test func forgettingDuringAFailingResolutionIsNotUndone() async throws {
         let harness = StoreHarness(policy: StorePolicy(failureHandling: .keep))
         try await harness.add("a", "/Users/me/A")

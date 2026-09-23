@@ -161,6 +161,20 @@ struct StoreMutationTests {
 
             try await harness.store.regrant("a", with: harness.grant("/Users/me/A/Inner"))
         }
+
+        @Test func validatorsForTheKeyRunOnARegrant() async throws {
+            let developer = URL(filePath: "/Users/me/Library/Developer")
+            let harness = StoreHarness(validatorsForKey: { _ in [.covers(developer)] })
+            let original = try await harness.add("developer", "/Users/me/Library")
+
+            let error = await #expect(throws: TestStore.Failure.self) {
+                try await harness.store.regrant("developer", with: harness.grant("/Users/me/Documents"))
+            }
+
+            #expect(error?.bookmarkFailure == .refused(.doesNotCover(target: "/Users/me/Library/Developer")))
+            #expect(try await harness.store.record("developer") == original)
+            #expect(harness.engine.isBalanced)
+        }
     }
 
     @Suite("Metadata and order")

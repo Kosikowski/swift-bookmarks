@@ -201,6 +201,21 @@ struct StoreAddTests {
 
             #expect(error?.bookmarkFailure == .refused(.insideExisting(existing: "/Users/me/Projects")))
         }
+
+        @Test func validatorsForAKeyCheckOnlyThatKey() async throws {
+            let developer = URL(filePath: "/Users/me/Library/Developer")
+            let harness = StoreHarness(validatorsForKey: { $0 == "developer" ? [.covers(developer)] : [] })
+
+            let error = await #expect(throws: TestStore.Failure.self) {
+                try await harness.add("developer", "/Users/me/Documents")
+            }
+            try await harness.add("developer", "/Users/me/Library")
+            try await harness.add("documents", "/Users/me/Documents")
+
+            #expect(error?.bookmarkFailure == .refused(.doesNotCover(target: "/Users/me/Library/Developer")))
+            #expect(try await harness.store.keys() == ["developer", "documents"])
+            #expect(harness.engine.isBalanced)
+        }
     }
 
     @Suite("Failures")

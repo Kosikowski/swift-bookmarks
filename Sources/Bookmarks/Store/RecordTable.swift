@@ -203,8 +203,13 @@ struct RecordTable<Key: Hashable & Sendable, Metadata: Sendable & Equatable>: Se
         }
     }
 
-    mutating func replaceAll(with loaded: [Record]) {
-        let fresh = RecordTable(loaded)
+    /// Replaces the records with `loaded`, noting what changed.
+    ///
+    /// With `keepingKnownState`, a loaded record whose bytes and kind are the ones this table
+    /// holds takes this table's status, identity, path and dates, for a persistence that
+    /// can't store them.
+    mutating func replaceAll(with loaded: [Record], keepingKnownState: Bool = false) {
+        let fresh = RecordTable(keepingKnownState ? loaded.map(withKnownState) : loaded)
         for key in order where fresh.records[key] == nil {
             invalidate(key)
         }
@@ -223,6 +228,19 @@ struct RecordTable<Key: Hashable & Sendable, Metadata: Sendable & Equatable>: Se
         }
         records = fresh.records
         order = fresh.order
+    }
+
+    private func withKnownState(_ loaded: Record) -> Record {
+        guard let known = records[loaded.key], known.data == loaded.data, known.kind == loaded.kind else {
+            return loaded
+        }
+        var record = loaded
+        record.lastKnownPath = known.lastKnownPath
+        record.fileIdentity = known.fileIdentity
+        record.status = known.status
+        record.createdAt = known.createdAt
+        record.refreshedAt = known.refreshedAt
+        return record
     }
 
     /// The changes since `old`, which must be this table before the current transaction, and

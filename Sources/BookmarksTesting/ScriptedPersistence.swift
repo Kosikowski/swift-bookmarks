@@ -14,10 +14,16 @@ public final class ScriptedPersistence<Key: Hashable & Sendable, Metadata: Senda
     }
 
     private let state: Mutex<State>
+    public let storesRecordState: Bool
 
     /// Creates a persistence holding `records`.
-    public init(records: [BookmarkRecord<Key, Metadata>] = []) {
+    ///
+    /// - Parameter storesRecordState: `false` to stand in for a legacy format that keeps only
+    ///   keys, bytes and metadata. The records are still kept whole; only the store's
+    ///   handling of them changes.
+    public init(records: [BookmarkRecord<Key, Metadata>] = [], storesRecordState: Bool = true) {
         state = Mutex(State(records: records))
+        self.storesRecordState = storesRecordState
     }
 
     /// Makes the next `count` loads fail with `reason`. Updates still succeed; script them with

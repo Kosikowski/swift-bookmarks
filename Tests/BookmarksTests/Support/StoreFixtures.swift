@@ -33,6 +33,7 @@ struct StoreHarness {
     init(
         environment: SandboxEnvironment = Fixtures.sandboxedMac,
         policy: StorePolicy = .default,
+        validatorsForKey: @escaping @Sendable (String) -> [any GrantValidator] = { _ in [] },
         records: [TestRecord] = [],
         timeout: Duration? = nil
     ) {
@@ -41,6 +42,7 @@ struct StoreHarness {
         store = TestStore(
             persistence: persistence,
             policy: policy,
+            validatorsForKey: validatorsForKey,
             service: Fixtures.service(engine, timeout: timeout),
             now: clock.function
         )

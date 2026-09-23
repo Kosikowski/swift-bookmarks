@@ -52,7 +52,8 @@ public struct StorePolicy: Sendable {
     /// The maximum number of records. Beyond it, the least recent records are removed: the
     /// oldest in insertion order, the least recently used in most-recently-used order.
     public var limit: Int?
-    /// Checks run on items before they're added or re-granted.
+    /// Checks run on items before they're added or re-granted. Checks that depend on the key
+    /// go in ``BookmarkStore/validatorsForKey``.
     public var validators: [any GrantValidator]
     /// Whether resolving a record may mount the volume that holds it.
     public var mounting: ResolutionPolicy.Mounting
