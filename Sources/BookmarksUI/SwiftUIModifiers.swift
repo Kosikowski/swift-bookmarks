@@ -29,9 +29,15 @@ extension View {
     /// Accepts dropped files and folders and hands them over as grants.
     ///
     /// Adopt every grant you keep and pass the rest to `BookmarkService.relinquish(_:)`.
-    public func bookmarkDropDestination(onDrop: @escaping ([Grant]) -> Bool) -> some View {
+    /// `isTargeted` reports when a drag enters and leaves the view, for highlighting it.
+    public func bookmarkDropDestination(
+        onDrop: @escaping ([Grant]) -> Bool,
+        isTargeted: @escaping (Bool) -> Void = { _ in }
+    ) -> some View {
         dropDestination(for: URL.self) { urls, _ in
             onDrop(GrantMapping.grants(from: urls, origin: .swiftUIDrop))
+        } isTargeted: { targeted in
+            isTargeted(targeted)
         }
     }
 }
