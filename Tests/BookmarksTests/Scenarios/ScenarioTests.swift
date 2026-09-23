@@ -233,6 +233,7 @@ private struct RejectingAliasEngine: FileSystemEngine {
     func itemExists(atPath path: String) -> Bool { base.itemExists(atPath: path) }
     func fileIdentity(of url: URL) -> FileIdentity? { base.fileIdentity(of: url) }
     func itemInfo(at url: URL) -> ItemInfo? { base.itemInfo(at: url) }
+    func namesAreCaseSensitive(at url: URL) -> Bool { base.namesAreCaseSensitive(at: url) }
     func writeAliasFile(_ data: BookmarkData, to url: URL) throws { throw CocoaError(.fileWriteNoPermission) }
     func aliasFileData(at url: URL) throws -> BookmarkData { try base.aliasFileData(at: url) }
 }

@@ -3,7 +3,7 @@ import Synchronization
 
 /// Keeps records in memory and fails loads or saves on request, for testing how an app
 /// handles storage errors.
-public final class ScriptedPersistence<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: BookmarkPersistence {
+public final class ScriptedPersistence<Key: Hashable & Sendable, Metadata: Sendable>: BookmarkPersistence {
     private struct State {
         var records: [BookmarkRecord<Key, Metadata>]
         var failingLoads: (count: Int, reason: PersistenceError.Reason) = (0, .readFailed)
@@ -44,7 +44,7 @@ public final class ScriptedPersistence<Key: Hashable & Sendable & Codable, Metad
         state.withLock { $0.loadCount }
     }
 
-    /// How many times ``save(_:)`` succeeded.
+    /// How many times ``save(_:)`` or ``update(_:)`` saved records.
     public var saveCount: Int {
         state.withLock { $0.saveCount }
     }
@@ -60,7 +60,16 @@ public final class ScriptedPersistence<Key: Hashable & Sendable & Codable, Metad
     }
 
     public func save(_ records: [BookmarkRecord<Key, Metadata>]) throws(PersistenceError) {
+        try update { _ in records }
+    }
+
+    /// Applies `transform` to the stored records as one step, like a backend shared between
+    /// processes. A scripted save failure fails the update and keeps the stored records.
+    public func update(
+        _ transform: ([BookmarkRecord<Key, Metadata>]) -> [BookmarkRecord<Key, Metadata>]?
+    ) throws(PersistenceError) {
         let failure = state.withLock { state -> PersistenceError? in
+            guard let records = transform(state.records) else { return nil }
             guard state.failingSaves.count > 0 else {
                 state.records = records
                 state.saveCount += 1

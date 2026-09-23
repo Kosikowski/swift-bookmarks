@@ -256,31 +256,86 @@ struct AccessRegistryTests {
     }
 }
 
-@Suite("AccessRegistry soft limit")
-struct AccessRegistrySoftLimitTests {
-    func leases(_ count: Int, softLimit: Int) -> (FakeBookmarkEngine, AccessRegistry<Int>, [AccessLease]) {
-        let engine = Fixtures.engine()
-        let registry = AccessRegistry<Int>(engine: engine, softLimit: softLimit)
-        let leases = (0..<count).map { index -> AccessLease in
-            engine.addItem(at: "/Items/\(index)")
-            let url = engine.grant("/Items/\(index)", origin: .fileImporter).url
-            return registry.lease(for: index, url: url)
-        }
-        return (engine, registry, leases)
+@Suite("ScopeLedger")
+struct ScopeLedgerTests {
+    let engine = Fixtures.engine()
+    let ledger = ScopeLedger(softLimit: 2)
+
+    func lease<Key>(_ path: String, key: Key, in registry: AccessRegistry<Key>, access: AccessMode? = .readWrite) -> AccessLease {
+        engine.addItem(at: path)
+        return registry.lease(for: key, url: engine.grant(path, origin: .fileImporter).url, access: access)
+    }
+
+    @Test func countsScopesAcrossRegistries() {
+        let first = AccessRegistry<Int>(engine: engine, ledger: ledger)
+        let second = AccessRegistry<String>(engine: engine, ledger: ledger)
+
+        let leases = [lease("/Items/0", key: 0, in: first), lease("/Items/1", key: "one", in: second)]
+
+        #expect(first.startedScopeCount == 1)
+        #expect(ledger.startedScopeCount == 2)
+        #expect(!ledger.hasExceededSoftLimit)
+        leases.forEach { $0.end() }
+        #expect(ledger.startedScopeCount == 0)
+        #expect(engine.isBalanced)
     }
 
     @Test func flagsWhenStartedScopesExceedTheSoftLimit() {
-        let (engine, registry, leases) = leases(3, softLimit: 2)
+        let first = AccessRegistry<Int>(engine: engine, ledger: ledger)
+        let second = AccessRegistry<Int>(engine: engine, ledger: ledger)
 
-        #expect(registry.hasExceededSoftLimit)
+        let leases = [lease("/Items/0", key: 0, in: first), lease("/Items/1", key: 1, in: first), lease("/Items/2", key: 2, in: second)]
+
+        #expect(ledger.hasExceededSoftLimit)
         leases.forEach { $0.end() }
         #expect(engine.isBalanced)
     }
 
-    @Test func staysQuietBelowTheSoftLimit() {
-        let (_, registry, leases) = leases(1, softLimit: 2)
+    @Test func countsLeasesOnResolvedBookmarks() async throws {
+        let service = BookmarkService(engine: engine, executor: Fixtures.executor, ledger: ledger)
+        let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
 
-        #expect(!registry.hasExceededSoftLimit)
-        leases.forEach { $0.end() }
+        let lease = try await service.resolve(data).beginAccess()
+
+        #expect(ledger.startedScopeCount == 1)
+        lease.end()
+        #expect(ledger.startedScopeCount == 0)
+    }
+
+    @Test func coversFromAnyRegistry() throws {
+        let other = AccessRegistry<String>(engine: engine, ledger: ledger)
+        let folder = lease("/Users/me/Projects", key: "projects", in: other)
+
+        let covering = try #require(ledger.lease(covering: URL(filePath: "/Users/me/Projects/App/File.swift")))
+
+        #expect(covering.url == folder.url)
+        #expect(engine.calls.starts == 1)
+        covering.end()
+        folder.end()
+        #expect(ledger.lease(covering: URL(filePath: "/Users/me/Projects/App")) == nil)
+        #expect(engine.isBalanced)
+    }
+
+    @Test func onlyCoversWithEnoughAccess() {
+        let registry = AccessRegistry<String>(engine: engine, ledger: ledger)
+        let readOnly = lease("/Users/me/ReadOnly", key: "ro", in: registry, access: .readOnly)
+        let reference = lease("/Users/me/Reference", key: "ref", in: registry, access: nil)
+
+        #expect(ledger.lease(covering: URL(filePath: "/Users/me/ReadOnly/File")) == nil)
+        #expect(ledger.lease(covering: URL(filePath: "/Users/me/ReadOnly/File"), access: .readOnly)?.url == readOnly.url)
+        #expect(ledger.lease(covering: URL(filePath: "/Users/me/Reference/File"), access: .readOnly) == nil)
+        readOnly.end()
+        reference.end()
+    }
+
+    @Test func invalidatedScopesLeaveTheLedger() {
+        let registry = AccessRegistry<String>(engine: engine, ledger: ledger)
+        let folder = lease("/Users/me/Projects", key: "projects", in: registry)
+
+        registry.endAll()
+
+        #expect(ledger.startedScopeCount == 0)
+        #expect(ledger.lease(covering: URL(filePath: "/Users/me/Projects/App")) == nil)
+        #expect(!folder.isActive)
     }
 }

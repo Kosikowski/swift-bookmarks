@@ -98,6 +98,14 @@ struct GrantValidatorTests {
             #expect(refusal == .containsExisting(existing: "/Users/tester/Projects"))
         }
 
+        @Test func ignoresCaseOnlyWhereTheVolumeDoes() {
+            let insensitive = ItemInfo(isDirectory: true, isSymbolicLink: false, canonicalPath: "/users/tester/projects", namesAreCaseSensitive: false)
+            let sensitive = ItemInfo(isDirectory: true, isSymbolicLink: false, canonicalPath: "/users/tester/projects")
+
+            #expect(base.refusal(.noOverlap, insensitive, existing: existing) == .duplicate(path: "/users/tester/projects"))
+            #expect(base.refusal(.noOverlap, sensitive, existing: existing) == nil)
+        }
+
         @Test func acceptsSiblingsWithSharedPrefixes() {
             #expect(base.refusal(.noOverlap, base.info("/Users/tester/ProjectsArchive"), existing: existing) == nil)
         }

@@ -58,6 +58,14 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         state.withLock { _ = $0.mountedVolumes.remove(path) }
     }
 
+    /// Makes the volume at `path` ignore case in names, as most Mac volumes do.
+    ///
+    /// Only the library's path comparisons change: the fake still looks items up by their
+    /// exact path. Volumes are case-sensitive until this is called.
+    public func makeCaseInsensitive(volumeAt path: String = "/") {
+        state.withLock { _ = $0.caseInsensitiveVolumes.insert(path) }
+    }
+
     /// Marks `path` and everything inside it as reachable without a grant, like the app's container.
     public func makeAccessibleWithoutGrant(_ path: String) {
         state.withLock { _ = $0.freelyAccessible.insert(path) }
@@ -71,9 +79,14 @@ public final class FakeBookmarkEngine: FileSystemEngine {
     // MARK: - Grants
 
     /// A grant as the system hands it over, recording any access the system starts for it.
+    ///
+    /// A grant released without being adopted or relinquished stops that access through this
+    /// engine, as the library's grants do.
     public func grant(_ path: String, origin: Grant.Origin) -> Grant {
         let url = URL(filePath: path)
-        let grant = Grant(url: url, origin: origin)
+        let grant = Grant(url: url, origin: origin, platform: environment.platform) { [self] url in
+            stopAccessing(url)
+        }
         state.withLock { state in
             state.issued.insert(path)
             if grant.isStartedBySystem(on: environment.platform) {
@@ -329,6 +342,11 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         }
     }
 
+    public func namesAreCaseSensitive(at url: URL) -> Bool {
+        let volume = FakeFileSystem.volume(of: url.fakePath)
+        return state.withLock { !$0.caseInsensitiveVolumes.contains(volume) }
+    }
+
     public func itemInfo(at url: URL) -> ItemInfo? {
         let path = url.fakePath
         return state.withLock { state in
@@ -337,7 +355,8 @@ public final class FakeBookmarkEngine: FileSystemEngine {
             return ItemInfo(
                 isDirectory: item.linkTarget == nil ? item.isDirectory : state.isDirectory(canonical),
                 isSymbolicLink: item.linkTarget != nil,
-                canonicalPath: canonical
+                canonicalPath: canonical,
+                namesAreCaseSensitive: !state.caseInsensitiveVolumes.contains(FakeFileSystem.volume(of: canonical))
             )
         }
     }

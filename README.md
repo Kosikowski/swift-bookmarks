@@ -61,13 +61,16 @@ let lease = resolved.beginAccess()
 
 Or conform your existing store to `BookmarkPersistence` and keep its format byte for byte. `MigratingPersistence` imports legacy records once.
 
+`JSONFilePersistence` can be shared between processes, such as an app and its extensions in an app group: every change is read, merged and written in one coordinated step, and `Task { await store.reload(on: persistence.changes()) }` keeps a store current with what the others save.
+
 ## Other scenarios
 
 - `service.documents(anchoredOn:)`: document-scoped bookmarks to files referenced from a document. It's the only way to anchor a bookmark on a document.
 - `service.handoff`: tokens that pass access to an XPC service or helper.
 - `service.aliasFiles`: Finder alias files.
+- Grants are used once. Adopt the ones you keep and let the others go: a grant released unused balances the access the system started for it.
 - `VolumeEvents`: mount and unmount notifications (macOS). `store.refreshStatuses(on: VolumeEvents.stream())` re-resolves unavailable records on every mount.
-- `AccessRegistry.lease(covering:)`: reuse a folder's access for files inside it instead of starting one scope per file.
+- `store.lease(covering:)` and `ScopeLedger.shared.lease(covering:)`: reuse a folder's access for files inside it instead of starting one scope per file.
 
 ## Testing apps that use it
 

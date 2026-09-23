@@ -16,6 +16,7 @@ struct FakeFileSystem: Sendable {
     var items: [String: FakeItem] = ["/": FakeItem(id: 1, isDirectory: true)]
     var nextItemID: UInt64 = 2
     var mountedVolumes: Set<String> = ["/"]
+    var caseInsensitiveVolumes: Set<String> = []
     var freelyAccessible: Set<String> = []
     var aliasFiles: [String: BookmarkData] = [:]
 

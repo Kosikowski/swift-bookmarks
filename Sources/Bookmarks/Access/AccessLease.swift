@@ -20,8 +20,17 @@ public final class AccessLease: Sendable {
     private let cycle: UInt64
     private let ended = Atomic<Bool>(false)
 
-    init(handle: ScopeHandle) {
-        let acquisition = handle.acquire()
+    convenience init(handle: ScopeHandle) {
+        self.init(handle: handle, acquisition: handle.acquire())
+    }
+
+    /// A lease joining the handle's current holders, or `nil` when the handle is idle.
+    convenience init?(activeHandle handle: ScopeHandle) {
+        guard let acquisition = handle.acquireIfActive() else { return nil }
+        self.init(handle: handle, acquisition: acquisition)
+    }
+
+    private init(handle: ScopeHandle, acquisition: ScopeHandle.Acquisition) {
         self.handle = handle
         url = handle.url
         didStartScope = acquisition.didStart
@@ -47,7 +56,7 @@ public final class AccessLease: Sendable {
     ///
     /// Returns `nil` when `descendant` isn't the leased item or inside it.
     public func url(forDescendant descendant: URL) -> URL? {
-        guard let components = NormalizedPath(url).relativeComponents(of: NormalizedPath(descendant)) else {
+        guard let components = handle.path.relativeComponents(of: NormalizedPath(descendant)) else {
             return nil
         }
         return components.reduce(url) { partial, component in

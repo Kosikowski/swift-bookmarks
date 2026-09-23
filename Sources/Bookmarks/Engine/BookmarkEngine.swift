@@ -46,6 +46,13 @@ public protocol ItemInspecting: Sendable {
 
     /// Describes the item at `url`, or `nil` when it can't be inspected.
     func itemInfo(at url: URL) -> ItemInfo?
+
+    /// Whether names on the volume that holds `url` differ by case.
+    ///
+    /// When nothing exists at `url`, its nearest existing ancestor decides. Return `true` when
+    /// unsure: comparing paths case-sensitively on a volume that ignores case only costs extra
+    /// system starts, while the opposite could map a path onto a different item.
+    func namesAreCaseSensitive(at url: URL) -> Bool
 }
 
 /// Reads and writes Finder alias files.

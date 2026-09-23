@@ -49,6 +49,23 @@ struct StoreFailurePathTests {
         #expect(harness.saved.isEmpty)
     }
 
+    @Test func savesDontWaitForHungSystemCalls() async throws {
+        let engine = Fixtures.engine()
+        let service = BookmarkService(engine: engine, executor: BlockingExecutor(label: "tests.single", width: 1))
+        let store = TestStore(persistence: InMemoryPersistence(), service: service)
+        engine.addItem(at: "/Users/me/A")
+        try await store.add(engine.grant("/Users/me/A", origin: .openPanel), key: "a", metadata: Tag(name: "a"))
+        let gate = engine.holdResolution(of: "/Users/me/A")
+
+        let hung = Task { try await store.lease("a") }
+        await gate.waitUntilReached()
+        try await store.updateMetadata("a") { $0.name = "renamed" }
+        gate.open()
+
+        #expect(try await store.record("a")?.metadata.name == "renamed")
+        try await hung.value.end()
+    }
+
     @Test func refreshingStatusesSkipsAvailableRecords() async throws {
         let harness = StoreHarness()
         try await harness.add("a", "/Users/me/A")

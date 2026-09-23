@@ -83,13 +83,15 @@ struct GrantMappingTests {
 
         let grants = GrantMapping.grants(from: urls, origin: .appKitDrop)
 
-        #expect(grants == [Grant(url: URL(filePath: "/a"), origin: .appKitDrop), Grant(url: URL(filePath: "/b"), origin: .appKitDrop)])
+        #expect(grants.map(\.url) == [URL(filePath: "/a"), URL(filePath: "/b")])
+        #expect(grants.map(\.origin) == [.appKitDrop, .appKitDrop])
     }
 
     @Test func importerResultsBecomeImporterGrants() throws {
         let grants = try GrantMapping.grants(from: .success([URL(filePath: "/a")])).get()
 
-        #expect(grants == [Grant(url: URL(filePath: "/a"), origin: .fileImporter)])
+        #expect(grants.map(\.url) == [URL(filePath: "/a")])
+        #expect(grants.map(\.origin) == [.fileImporter])
     }
 
     @Test func importerFailuresPassThrough() {

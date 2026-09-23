@@ -50,6 +50,37 @@ struct BlockingExecutorTests {
         #expect(finishedAfterRelease)
     }
 
+    @Test func skipsQueuedWorkWhoseCallerStoppedWaiting() async throws {
+        let executor = BlockingExecutor(label: "test", width: 1)
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let skippedRan = Atomic(false)
+        let blocker = Task {
+            try await executor.run {
+                started.signal()
+                release.wait()
+            }
+        }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                started.wait()
+                continuation.resume()
+            }
+        }
+
+        await #expect(throws: BlockingExecutor.TimeoutError(timeout: .milliseconds(20))) {
+            try await executor.run(timeout: .milliseconds(20)) {
+                skippedRan.store(true, ordering: .relaxed)
+            }
+        }
+        release.signal()
+        try await blocker.value
+        try await executor.run { }
+
+        let ran = skippedRan.load(ordering: .relaxed)
+        #expect(!ran)
+    }
+
     @Test func fastWorkBeatsTheTimeout() async throws {
         let executor = BlockingExecutor(label: "test", width: 1)
 

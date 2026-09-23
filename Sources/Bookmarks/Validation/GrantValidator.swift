@@ -74,18 +74,21 @@ public struct NotTooBroadValidator: GrantValidator {
     }
 
     public func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal? {
-        let path = NormalizedPath(item.canonicalPath)
+        let path = NormalizedPath(item.canonicalPath, isCaseSensitive: item.namesAreCaseSensitive)
         let home = NormalizedPath(context.homeDirectory.resolvingSymlinksInPath())
         let isRefused = Self.isSystemLocation(path)
             || path.contains(home)
-            || additionalPaths.contains { NormalizedPath(URL(filePath: $0).resolvingSymlinksInPath()) == path }
+            || additionalPaths.contains { path.matches(NormalizedPath(URL(filePath: $0).resolvingSymlinksInPath())) }
         return isRefused ? .tooBroad(path: path.string) : nil
     }
 
     private static func isSystemLocation(_ path: NormalizedPath) -> Bool {
         switch path.components.count {
         case 0, 1: true
-        case 2: ["Users", "private", "System"].contains(path.components[0])
+        case 2:
+            ["Users", "private", "System"].contains {
+                path.isCaseSensitive ? $0 == path.components[0] : $0.caseInsensitiveCompare(path.components[0]) == .orderedSame
+            }
         default: false
         }
     }
@@ -129,10 +132,10 @@ public struct NoOverlapValidator: GrantValidator {
     }
 
     public func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal? {
-        let candidate = NormalizedPath(item.canonicalPath)
+        let candidate = NormalizedPath(item.canonicalPath, isCaseSensitive: item.namesAreCaseSensitive)
         for existingPath in context.existingPaths {
-            let existing = NormalizedPath(existingPath)
-            if candidate == existing {
+            let existing = NormalizedPath(existingPath, isCaseSensitive: item.namesAreCaseSensitive)
+            if candidate.matches(existing) {
                 return .duplicate(path: item.canonicalPath)
             }
             guard !allowsNesting else { continue }
@@ -159,7 +162,7 @@ public struct CoversValidator: GrantValidator {
 
     public func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal? {
         let resolvedTarget = NormalizedPath(target.resolvingSymlinksInPath())
-        return NormalizedPath(item.canonicalPath).contains(resolvedTarget)
+        return NormalizedPath(item.canonicalPath, isCaseSensitive: item.namesAreCaseSensitive).contains(resolvedTarget)
             ? nil
             : .doesNotCover(target: target.path(percentEncoded: false))
     }

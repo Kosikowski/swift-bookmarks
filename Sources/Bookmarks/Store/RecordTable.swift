@@ -1,6 +1,6 @@
 import Foundation
 
-struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: Sendable {
+struct RecordTable<Key: Hashable & Sendable, Metadata: Sendable & Equatable>: Sendable {
     typealias Record = BookmarkRecord<Key, Metadata>
 
     struct Snapshot: Sendable {
@@ -58,13 +58,13 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
         orderedRecords.filter { $0.key != key }.map(\.lastKnownPath)
     }
 
-    func duplicate(of identity: FileIdentity?, path: String, excluding key: Key) -> Record? {
+    func duplicate(of identity: FileIdentity?, path: NormalizedPath, excluding key: Key) -> Record? {
         orderedRecords.first { record in
             guard record.key != key else { return false }
             if let identity, let other = record.fileIdentity {
                 return identity == other
             }
-            return record.lastKnownPath == path
+            return path.matches(NormalizedPath(record.lastKnownPath))
         }
     }
 
@@ -73,12 +73,12 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
         if let identity, let match = records.first(where: { $0.fileIdentity == identity }) {
             return match.key
         }
-        return records.first { NormalizedPath($0.lastKnownPath) == path }?.key
+        return records.first { path.matches(NormalizedPath($0.lastKnownPath)) }?.key
     }
 
     func keysContaining(_ path: NormalizedPath) -> [Key] {
         orderedRecords
-            .map { (key: $0.key, path: NormalizedPath($0.lastKnownPath)) }
+            .map { (key: $0.key, path: NormalizedPath($0.lastKnownPath, isCaseSensitive: path.isCaseSensitive)) }
             .filter { $0.path.contains(path) }
             .sorted { $0.path.components.count > $1.path.components.count }
             .map(\.key)
@@ -203,7 +203,7 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
             if old.data != new.data || old.kind != new.kind {
                 invalidate(key)
             }
-            if !Self.sameState(old, new) || !Self.sameMetadata(old, new) {
+            if !Self.sameState(old, new) || old.metadata != new.metadata {
                 modified.insert(key)
             }
         }
@@ -242,12 +242,7 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
             && lhs.createdAt == rhs.createdAt && lhs.refreshedAt == rhs.refreshedAt
     }
 
-    private static func sameMetadata(_ lhs: Record, _ rhs: Record) -> Bool {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        guard let left = try? encoder.encode([lhs.metadata]), let right = try? encoder.encode([rhs.metadata]) else {
-            return false
-        }
-        return left == right
+    static func sameRecord(_ lhs: Record, _ rhs: Record) -> Bool {
+        lhs.key == rhs.key && sameState(lhs, rhs) && lhs.metadata == rhs.metadata
     }
 }

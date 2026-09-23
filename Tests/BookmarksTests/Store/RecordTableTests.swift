@@ -135,16 +135,26 @@ struct RecordTableTests {
         @Test func duplicatesMatchByIdentityWhenBothHaveOne() {
             let table = Table([RecordTableTests.record("a", path: "/old", identity: identity)])
 
-            #expect(table.duplicate(of: identity, path: "/elsewhere", excluding: "b")?.key == "a")
-            #expect(table.duplicate(of: FileIdentity(volumeUUID: "V", fileID: 2), path: "/old", excluding: "b") == nil)
-            #expect(table.duplicate(of: identity, path: "/old", excluding: "a") == nil)
+            #expect(table.duplicate(of: identity, path: NormalizedPath("/elsewhere"), excluding: "b")?.key == "a")
+            #expect(table.duplicate(of: FileIdentity(volumeUUID: "V", fileID: 2), path: NormalizedPath("/old"), excluding: "b") == nil)
+            #expect(table.duplicate(of: identity, path: NormalizedPath("/old"), excluding: "a") == nil)
         }
 
         @Test func duplicatesFallBackToThePath() {
             let table = Table([RecordTableTests.record("a", path: "/old")])
 
-            #expect(table.duplicate(of: identity, path: "/old", excluding: "b")?.key == "a")
-            #expect(table.duplicate(of: nil, path: "/new", excluding: "b") == nil)
+            #expect(table.duplicate(of: identity, path: NormalizedPath("/old"), excluding: "b")?.key == "a")
+            #expect(table.duplicate(of: nil, path: NormalizedPath("/new"), excluding: "b") == nil)
+        }
+
+        @Test func pathFallbacksFollowTheVolumesCaseRule() {
+            let table = Table([RecordTableTests.record("a", path: "/Users/me/Old")])
+
+            #expect(table.duplicate(of: nil, path: NormalizedPath("/users/me/old", isCaseSensitive: false), excluding: "b")?.key == "a")
+            #expect(table.duplicate(of: nil, path: NormalizedPath("/users/me/old"), excluding: "b") == nil)
+            #expect(table.key(matching: nil, path: NormalizedPath("/USERS/me/OLD", isCaseSensitive: false)) == "a")
+            #expect(table.keysContaining(NormalizedPath("/users/me/old/file", isCaseSensitive: false)) == ["a"])
+            #expect(table.keysContaining(NormalizedPath("/users/me/old/file")).isEmpty)
         }
 
         @Test func keysMatchByIdentityFirstThenByPath() {
@@ -414,27 +424,17 @@ struct RecordTableTests {
             #expect(transaction.changes.isEmpty)
         }
 
-        @Test func metadataThatCantBeEncodedCountsAsChanged() {
-            let record = BookmarkRecord(key: "a", data: BookmarkData(Data()), kind: .reference, lastKnownPath: "/a", createdAt: RecordTableTests.date, metadata: Unencodable())
-            var table = RecordTable<String, Unencodable>([record])
+        @Test func changedMetadataCountsAsChanged() {
+            let record = BookmarkRecord(key: "a", data: BookmarkData(Data()), kind: .reference, lastKnownPath: "/a", createdAt: RecordTableTests.date, metadata: 1)
+            var changed = record
+            changed.metadata = 2
+            var table = RecordTable<String, Int>([record])
 
             let old = table
-            table.replaceAll(with: [record])
+            table.replaceAll(with: [changed])
             let (changes, _) = table.takeChanges(since: old)
 
             #expect(changes.map(\.summary) == ["updated a"])
         }
-    }
-}
-
-struct Unencodable: Codable, Sendable {
-    struct Refusal: Error {}
-
-    init() {}
-
-    init(from decoder: any Decoder) throws {}
-
-    func encode(to encoder: any Encoder) throws {
-        throw Refusal()
     }
 }

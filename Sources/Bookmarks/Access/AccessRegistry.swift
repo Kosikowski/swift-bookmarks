@@ -1,25 +1,22 @@
 public import Foundation
-import os
 import Synchronization
 
 /// Tracks active access per key so each item is started once, however many leases hold it.
 ///
 /// Keys identify items, not URLs: two URLs for the same bookmark share one system start, and a
 /// rescan or re-resolve while access is active reuses it instead of starting again. The
-/// registry is synchronous and safe to use from any thread.
+/// registry is synchronous and safe to use from any thread. Its scopes count towards its
+/// ledger, which covers the whole process.
 public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
+    /// The ledger the registry's scopes are counted in.
+    public let ledger: ScopeLedger
     private let engine: any BookmarkEngine
     private let handles = Mutex<[Key: ScopeHandle]>([:])
-    private let softLimit: Int
-    private let warnedAboutLimit = Atomic<Bool>(false)
 
     /// Creates a registry.
-    ///
-    /// - Parameter softLimit: The number of started scopes above which the registry logs a
-    ///   warning. The kernel limit is roughly 1,000 to 2,500 per process and can't be queried.
-    public init(engine: any BookmarkEngine, softLimit: Int = 500) {
+    public init(engine: any BookmarkEngine, ledger: ScopeLedger = .shared) {
         self.engine = engine
-        self.softLimit = softLimit
+        self.ledger = ledger
     }
 
     /// A new lease on the item's active access, or `nil` when the item isn't currently leased.
@@ -37,22 +34,40 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
     /// An unused implicit start taken during resolution moves to the registry, so it's
     /// balanced by the registry's leases.
     public func lease(for key: Key, resolved: ResolvedBookmark) -> AccessLease {
-        lease(for: key, url: resolved.url) { resolved.handle.transferUnusedStart() }
+        lease(
+            for: key,
+            url: resolved.url,
+            access: resolved.handle.access,
+            isCaseSensitive: resolved.handle.path.isCaseSensitive
+        ) {
+            resolved.handle.transferUnusedStart()
+        }
     }
 
-    func lease(for key: Key, url: URL, alreadyStarted: () -> Bool = { false }) -> AccessLease {
-        let lease = handles.withLock { handles in
+    func lease(
+        for key: Key,
+        url: URL,
+        access: AccessMode? = .readWrite,
+        isCaseSensitive: Bool = true,
+        alreadyStarted: () -> Bool = { false }
+    ) -> AccessLease {
+        handles.withLock { handles in
             if let active = handles[key], !active.isIdle {
                 return AccessLease(handle: active)
             }
-            let handle = ScopeHandle(url: url, engine: engine, alreadyStarted: alreadyStarted()) { [weak self] idle in
+            let handle = ScopeHandle(
+                url: url,
+                engine: engine,
+                ledger: ledger,
+                access: access,
+                isCaseSensitive: isCaseSensitive,
+                alreadyStarted: alreadyStarted()
+            ) { [weak self] idle in
                 self?.remove(idle, for: key)
             }
             handles[key] = handle
             return AccessLease(handle: handle)
         }
-        warnIfOverLimit()
-        return lease
     }
 
     /// A lease on an active item that contains `url`, or `nil` when none does.
@@ -63,10 +78,9 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
         let target = NormalizedPath(url)
         return handles.withLock { handles in
             let covering = handles.values
-                .map { (handle: $0, path: NormalizedPath($0.url)) }
-                .filter { !$0.handle.isIdle && $0.path.contains(target) }
+                .filter { !$0.isIdle && $0.path.contains(target) }
                 .max { $0.path.components.count < $1.path.components.count }
-            return covering.map { AccessLease(handle: $0.handle) }
+            return covering.map { AccessLease(handle: $0) }
         }
     }
 
@@ -94,14 +108,10 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
         handles.withLock { Set($0.filter { !$0.value.isIdle }.keys) }
     }
 
-    /// The number of items whose system start succeeded and is still held.
+    /// The number of this registry's items whose system start succeeded and is still held.
+    /// ``ScopeLedger/startedScopeCount`` counts the whole process.
     public var startedScopeCount: Int {
         handles.withLock { $0.values.count { $0.holdsStartedScope } }
-    }
-
-    /// Whether the number of started scopes has exceeded the soft limit at some point.
-    public var hasExceededSoftLimit: Bool {
-        warnedAboutLimit.load(ordering: .relaxed)
     }
 
     private func remove(_ handle: ScopeHandle, for key: Key) {
@@ -109,13 +119,6 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
             if let current = handles[key], current === handle, handle.isIdle {
                 handles[key] = nil
             }
-        }
-    }
-
-    private func warnIfOverLimit() {
-        let count = startedScopeCount
-        if count > softLimit, !warnedAboutLimit.exchange(true, ordering: .relaxed) {
-            Log.access.warning("\(count, privacy: .public) security scopes are active; the kernel limit is near")
         }
     }
 }

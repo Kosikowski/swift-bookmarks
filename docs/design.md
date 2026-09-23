@@ -209,7 +209,7 @@ extension BookmarkService {
 - One OS start per **key**, with an internal refcount of leases (R3). The first lease starts, the last `end()` stops.
 - Holds the resolved URL instance for the key so later leases reuse it instead of re-resolving. `lease(for:resolved:)` adopts the scope of a `ResolvedBookmark`, so an implicit start taken during resolution is balanced by the same leases.
 - `lease(covering: url)` returns a lease on an already-open ancestor when one exists (R10).
-- `activeScopeCount` for diagnostics; logs a warning past a soft limit (default 500).
+- `startedScopeCount` for diagnostics. Every scope, from any registry or resolved bookmark, is also counted in a process-wide `ScopeLedger`, which logs a warning past a soft limit (default 500) and answers `lease(covering:access:)` across the whole process, because the kernel's limit is per process.
 - `endAll()` for termination, ordered after caller-supplied shutdown hooks.
 - Leases stay valid while work is in flight: `forget` on the store marks the key for removal and stops access only when the last lease ends.
 
@@ -222,7 +222,7 @@ Concurrent resolves of the same key share one engine call and one refresh. So a 
 For apps that want the library to own the keyed collection (most of them).
 
 ```swift
-public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable> {
+public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equatable> {
     public init(persistence: some BookmarkPersistence<Key, Metadata>,
                 kind: BookmarkKind? = nil,
                 policy: StorePolicy = .default,
@@ -246,7 +246,7 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     public func records() async throws(BookmarkStoreError<Key>) -> [BookmarkRecord<Key, Metadata>]   // includes unresolved ones
     public func record(_ key: Key) async throws -> BookmarkRecord<Key, Metadata>?
     public func key(matching url: URL) async throws -> Key?                  // by file identity, then path
-    public func updateMetadata(_ key: Key, _ change: sending (inout Metadata) -> Void) async throws
+    public func updateMetadata(_ key: Key, _ change: @Sendable (inout Metadata) -> Void) async throws
     public func availability(_ key: Key) async throws -> Availability
     public func refreshStatuses() async throws(BookmarkStoreError<Key>) -> [Key]  // e.g. on volume mount
 
@@ -254,7 +254,7 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     public func updates(bufferingPolicy: …= .unbounded) async throws -> AsyncStream<StoreUpdate<Key, Metadata>>
 }
 
-public struct BookmarkRecord<Key, Metadata>: Sendable, Codable {
+public struct BookmarkRecord<Key, Metadata>: Sendable {   // Codable when Key and Metadata are
     public let key: Key
     public var data: BookmarkData
     public var kind: BookmarkKind
@@ -277,6 +277,8 @@ Store behaviour:
 - **Optional ordering and limit** (`StorePolicy.limit`) for recents lists.
 - **Validators** run on `add` and `regrant` (§9.3).
 - **Writes are serialised** and the in-memory state only changes after persistence succeeds. The actor is reentrant at the persistence `await`, so an async lock keeps writes in order; reads see the last saved state and never wait for a save.
+- **Writes merge with what is stored.** Each change is applied to the records as the persistence holds them at that moment, inside `BookmarkPersistence.update(_:)`, so a host app and its extensions can share one file without overwriting each other. Changes another process saved reach subscribers with the next change, with `reload()`, or continuously through `reload(on: persistence.changes())`.
+- **Paths compare as the volume does.** Path fallbacks (duplicates without an identity, `key(matching:)`, covering leases, overlap validators) ignore Unicode normalisation and the `/private` firmlinks, and ignore case where the engine reports that the volume does.
 
 ### 7.1 Persistence
 
@@ -285,6 +287,8 @@ public protocol BookmarkPersistence<Key, Metadata>: Sendable {
     associatedtype Key; associatedtype Metadata
     func load() throws -> [BookmarkRecord<Key, Metadata>]
     func save(_ records: [BookmarkRecord<Key, Metadata>]) throws
+    /// Read, transform and save as one step. Defaults to load() then save().
+    func update(_ transform: ([BookmarkRecord<Key, Metadata>]) -> [BookmarkRecord<Key, Metadata>]?) throws
 }
 ```
 
@@ -300,12 +304,14 @@ Built in:
 
 `MigratingPersistence` imports legacy records once on load for apps changing format later, and never deletes the legacy value until the migrated value is saved. It requires a `MigrationMarker`, so a store the user empties isn't refilled from legacy data.
 
-The store calls `load()` and `save(_:)` on the blocking executor, one at a time, so adapters can do synchronous I/O.
+The store calls `load()` and `update(_:)` on its own serial executor, one at a time, so adapters can do synchronous I/O and a hung volume on the resolution executor never holds up a save.
+
+**Format evolution.** The built-in JSON format must survive a newer build writing it and an older build reading it, for example an extension on an older library sharing an app group. Kinds, failures and statuses encode as stable string codes. Records decode one at a time: a record this version can't decode is kept verbatim and written back unchanged, and a status it doesn't know decodes as `.unknown`. `schemaVersion` changes only when the envelope itself changes incompatibly.
 
 ## 8. Grants: where URLs come from
 
 ```swift
-public struct Grant: Sendable {
+public final class Grant: Sendable {    // used once; balances an unused system start on release
     public let url: URL
     public let origin: Origin
     public enum Origin: Sendable {
@@ -318,7 +324,7 @@ public struct Grant: Sendable {
 }
 ```
 
-Intake follows the pattern recommended by Apple DTS: bookmark the system URL immediately, balance its start according to its origin (R8), resolve the new bookmark, and use only the resolved URL from then on. Whether the system started access depends on where the URL came from, and the integration host verifies each origin (§11).
+A grant is an obligation like a lease: adopting or relinquishing it is idempotent, and a grant released without either stops the system's start itself, so ignoring a picker result doesn't leak a scope. Intake follows the pattern recommended by Apple DTS: bookmark the system URL immediately, balance its start according to its origin (R8), resolve the new bookmark, and use only the resolved URL from then on. Whether the system started access depends on where the URL came from, and the integration host verifies each origin (§11).
 
 Save panels return URLs for files that don't exist yet; bookmark creation fails with 260 until the file is written. `Grant.savePanel` bookmarks the parent directory's scope, or defers creation until `commitWrite()`.
 
@@ -399,12 +405,12 @@ The answers feed back into `Grant` intake and the fake engine, so unit tests sta
 
 Where the code differs from the sketches above:
 
-- **Engine:** the seam is three protocols. `BookmarkEngine` creates and resolves bytes and starts and stops scopes, taking Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. `ItemInspecting` answers `itemInfo(at:)`, `fileIdentity(of:)` and `itemExists(atPath:)`, and `AliasFileAccessing` reads and writes alias files. `BookmarkService` takes their composition, `FileSystemEngine`; the registry and scopes need only `BookmarkEngine`, and validation only `ItemInspecting`. Engines must not call back into the library, because starts and stops run under its locks.
+- **Engine:** the seam is three protocols. `BookmarkEngine` creates and resolves bytes and starts and stops scopes, taking Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. `ItemInspecting` answers `itemInfo(at:)`, `fileIdentity(of:)`, `itemExists(atPath:)` and `namesAreCaseSensitive(at:)`, and `AliasFileAccessing` reads and writes alias files. `BookmarkService` takes their composition, `FileSystemEngine`; the registry and scopes need only `BookmarkEngine`, and validation only `ItemInspecting`. Engines must not call back into the library, because starts and stops run under its locks.
 - **Default kind:** `BookmarkKind.persistentDefault(for:)` takes the environment; the static property uses the current process.
 - **Failures:** `BookmarkFailure` also has `.refused(GrantRefusal)` for validator refusals and `.cancelled` for callers that stop waiting.
 - **Validators** run inside `BookmarkService.adopt` and `create`, while access to the item is held, through `validators:` and `context:` parameters. They inspect items through `BookmarkEngine.itemInfo(at:)`. `.notTooBroad` refuses every top-level folder, other users' homes and second-level system folders as well as the home folder and its ancestors.
 - **Grant origins:** `Grant.isStartedBySystem(on:)` takes the platform, so tests can check every platform on one machine.
-- **Store:** an actor whose bookkeeping lives in an internal `RecordTable` value type. Errors are `BookmarkStoreError<Key>`. Resolution uses `StorePolicy.mounting` and `StorePolicy.allowsUI`, not a per-call argument; the store never lets resolution start implicit access, so the policy has no field for it. A lease whose record keeps changing during resolution fails with `BookmarkStoreError.changedDuringAccess` rather than `.notFound`. `lease(covering:)` falls back to a shallower stored folder when the deepest one doesn't resolve.
+- **Store:** an actor whose bookkeeping lives in an internal `RecordTable` value type. Errors are `BookmarkStoreError<Key>`. Resolution uses `StorePolicy.mounting` and `StorePolicy.allowsUI`, not a per-call argument; the store never lets resolution start implicit access, so the policy has no field for it. A lease whose record keeps changing during resolution fails with `BookmarkStoreError.changedDuringAccess` rather than `.notFound`. `lease(covering:)` first reuses an active scope anywhere in the process that grants the store's access, then falls back to a shallower stored folder when the deepest one doesn't resolve. The registry is internal; the store exposes `activeLease(for:)`, `activeKeys` and `endAllAccess()`.
 - **Grants consumed by helpers:** `DocumentBookmarks.create(for:)` and `AliasFiles.write(aliasTo:at:)` relinquish their grant whether or not they succeed, like `adopt`. `BookmarkService.relinquish(_:)` also takes a sequence, for the rejected items of a multi-item drop or panel.
 - **Implicit starts:** a resolved bookmark whose implicit start was never taken over by a lease stops it when released.
 - **Save panels:** there is no `commitWrite()`. Callers write the file first, then create or adopt the bookmark.

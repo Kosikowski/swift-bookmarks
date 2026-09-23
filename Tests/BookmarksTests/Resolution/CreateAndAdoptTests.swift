@@ -237,6 +237,71 @@ struct CreateAndAdoptTests {
         }
     }
 
+    @Suite("Grant use")
+    struct GrantUse {
+        let engine = Fixtures.engine()
+        var service: BookmarkService { Fixtures.service(engine) }
+
+        @Test func relinquishingTwiceStopsOnce() {
+            engine.addItem(at: "/Users/me/Folder")
+            let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+
+            service.relinquish(grant)
+            service.relinquish(grant)
+
+            #expect(grant.isConsumed)
+            #expect(engine.calls.stops == 1)
+            #expect(engine.isBalanced)
+        }
+
+        @Test func adoptedGrantsAreNotRelinquishedAgain() async throws {
+            engine.addItem(at: "/Users/me/Folder")
+            let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+
+            let resolved = try await service.adopt(grant)
+            service.relinquish(grant)
+            resolved.beginAccess().end()
+
+            #expect(engine.isBalanced)
+        }
+
+        @Test func aUsedGrantCantBeAdoptedAgain() async throws {
+            engine.addItem(at: "/Users/me/Folder")
+            let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+            service.relinquish(grant)
+
+            let error = await #expect(throws: BookmarkError.self) { try await service.adopt(grant) }
+
+            guard case .unsupported = error?.failure else {
+                Issue.record("Expected unsupported, got \(String(describing: error))")
+                return
+            }
+            #expect(engine.isBalanced)
+        }
+
+        @Test func droppedGrantsBalanceTheSystemStart() {
+            engine.addItem(at: "/Users/me/Folder")
+
+            do {
+                let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+                #expect(engine.isAccessing("/Users/me/Folder"))
+                _ = grant
+            }
+
+            #expect(engine.isBalanced)
+        }
+
+        @Test func droppedGrantsTheSystemDidntStartStopNothing() {
+            engine.addItem(at: "/Users/me/Folder")
+
+            do {
+                _ = engine.grant("/Users/me/Folder", origin: .fileImporter)
+            }
+
+            #expect(engine.calls.stops == 0)
+        }
+    }
+
     @Suite("Grant origins")
     struct Origins {
         @Test(arguments: [Grant.Origin.openPanel, .savePanel, .appKitDrop, .finderOpen])

@@ -13,8 +13,9 @@ enum Fixtures {
         FakeBookmarkEngine(environment: environment)
     }
 
+    /// A service with its own ledger, so tests running in parallel don't see each other's scopes.
     static func service(_ engine: FakeBookmarkEngine, timeout: Duration? = nil) -> BookmarkService {
-        BookmarkService(engine: engine, executor: executor, timeout: timeout)
+        BookmarkService(engine: engine, executor: executor, timeout: timeout, ledger: ScopeLedger())
     }
 
     static func adoptFolder(

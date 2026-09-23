@@ -9,10 +9,8 @@ struct FakeBookmarkEngineTests {
 
     func bookmark(_ path: String, options: URL.BookmarkCreationOptions = [.withSecurityScope], origin: Grant.Origin = .openPanel) throws -> BookmarkData {
         engine.addItem(at: path)
+        // The grant balances the system's start when it's released at the end of this call.
         let grant = engine.grant(path, origin: origin)
-        defer {
-            if grant.isStartedBySystem(on: .macOS) { engine.stopAccessing(grant.url) }
-        }
         return try engine.makeBookmark(for: grant.url, options: options, includingResourceValuesFor: [], relativeTo: nil)
     }
 

@@ -16,13 +16,15 @@ struct BalanceReportTests {
         let engine = FakeBookmarkEngine()
         engine.addItem(at: "/b")
         engine.addItem(at: "/a")
-        _ = engine.grant("/b", origin: .openPanel)
-        _ = engine.grant("/a", origin: .appKitDrop)
-        _ = engine.grant("/a", origin: .appKitDrop)
+        let grants = [
+            engine.grant("/b", origin: .openPanel),
+            engine.grant("/a", origin: .appKitDrop),
+            engine.grant("/a", origin: .appKitDrop),
+        ]
         engine.stopAccessing(URL(filePath: "/stray"))
         _ = engine.startAccessing(URL(filePath: "/rebuilt"))
 
-        let report = engine.balanceReport
+        let report = withExtendedLifetime(grants) { engine.balanceReport }
 
         #expect(!report.isBalanced)
         #expect(report.outstanding == ["/a": 2, "/b": 1])

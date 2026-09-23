@@ -13,16 +13,20 @@ public struct BookmarkService: Sendable {
     public let executor: BlockingExecutor
     /// How long to wait for a single system call. `nil` waits indefinitely.
     public var timeout: Duration?
+    /// Where the scopes of resolved bookmarks and of stores using this service are counted.
+    public let ledger: ScopeLedger
 
     /// Creates a bookmark service.
     public init(
         engine: any FileSystemEngine = SystemBookmarkEngine(),
         executor: BlockingExecutor = .shared,
-        timeout: Duration? = nil
+        timeout: Duration? = nil,
+        ledger: ScopeLedger = .shared
     ) {
         self.engine = engine
         self.executor = executor
         self.timeout = timeout
+        self.ledger = ledger
     }
 
     /// The environment of the engine.
@@ -82,9 +86,10 @@ public struct BookmarkService: Sendable {
 
     /// Balances the access the system started for a grant that won't be adopted.
     ///
-    /// Does nothing for origins whose access the system didn't start.
+    /// Does nothing for origins whose access the system didn't start, and for grants already
+    /// adopted or relinquished.
     public func relinquish(_ grant: Grant) {
-        if grant.isStartedBySystem(on: environment.platform) {
+        if grant.claim(), grant.isStartedBySystem(on: environment.platform) {
             engine.stopAccessing(grant.url)
         }
     }
@@ -224,6 +229,7 @@ extension BookmarkService {
         try checkSupported(kind, document: document)
         let engine = engine
         let classifier = classifier
+        let ledger = ledger
         return try await run { () throws(BookmarkError) -> ResolvedBookmark in
             try Self.resolveNow(
                 data,
@@ -231,6 +237,7 @@ extension BookmarkService {
                 document: document,
                 policy: policy,
                 engine: engine,
+                ledger: ledger,
                 classifier: classifier
             )
         }
@@ -301,6 +308,9 @@ extension BookmarkService {
         keys: Set<URLResourceKey>,
         validation: Validation?
     ) async throws(BookmarkError) -> Created {
+        guard !grant.isConsumed else {
+            throw BookmarkError(.unsupported(reason: "The grant was already adopted or relinquished."))
+        }
         let engine = engine
         let classifier = classifier
         let platform = environment.platform
@@ -333,7 +343,8 @@ extension BookmarkService {
         kind: BookmarkKind,
         document: URL?,
         policy: ResolutionPolicy,
-        engine: any BookmarkEngine,
+        engine: any BookmarkEngine & ItemInspecting,
+        ledger: ScopeLedger,
         classifier: FailureClassifier
     ) throws(BookmarkError) -> ResolvedBookmark {
         let recorded = engine.recordedValues(in: data)
@@ -372,7 +383,14 @@ extension BookmarkService {
             refreshError: refreshError,
             recorded: recorded,
             fileIdentity: nil,
-            handle: ScopeHandle(url: resolution.url, engine: engine, alreadyStarted: startedImplicitly)
+            handle: ScopeHandle(
+                url: resolution.url,
+                engine: engine,
+                ledger: ledger,
+                access: kind.grantedAccess,
+                isCaseSensitive: engine.namesAreCaseSensitive(at: resolution.url),
+                alreadyStarted: startedImplicitly
+            )
         )
     }
 

@@ -508,6 +508,48 @@ struct StoreLeaseTests {
 
     @Suite("Covering leases")
     struct Covering {
+        @Test func ignoresCaseOnVolumesThatIgnoreIt() async throws {
+            let harness = StoreHarness()
+            harness.engine.makeCaseInsensitive()
+            try await harness.add("projects", "/Users/me/Projects")
+
+            let lease = try #require(try await harness.store.lease(covering: URL(filePath: "/users/me/projects/App/File.swift")))
+
+            #expect(lease.url.path(percentEncoded: false) == "/Users/me/Projects/")
+            #expect(lease.url(forDescendant: URL(filePath: "/users/me/projects/App/File.swift"))?.path(percentEncoded: false) == "/Users/me/Projects/App/File.swift")
+            #expect(harness.store.registry.lease(covering: URL(filePath: "/USERS/ME/PROJECTS/App"))?.url == lease.url)
+            lease.end()
+            #expect(harness.engine.isBalanced)
+        }
+
+        @Test func reusesAFolderAnotherStoreHolds() async throws {
+            let engine = Fixtures.engine()
+            let service = Fixtures.service(engine)
+            let folders = TestStore(persistence: InMemoryPersistence(), service: service)
+            let files = TestStore(persistence: InMemoryPersistence(), service: service)
+            engine.addItem(at: "/Users/me/Projects")
+            try await folders.add(engine.grant("/Users/me/Projects", origin: .openPanel), key: "projects", metadata: Tag(name: "p"))
+            let folder = try await folders.lease("projects")
+            let starts = engine.calls.starts
+
+            let covering = try #require(try await files.lease(covering: URL(filePath: "/Users/me/Projects/App/File.swift")))
+
+            #expect(covering.url == folder.url)
+            #expect(engine.calls.starts == starts)
+            #expect(service.ledger.startedScopeCount == 1)
+            covering.end()
+            folder.end()
+            #expect(engine.isBalanced)
+        }
+
+        @Test func respectsCaseOnCaseSensitiveVolumes() async throws {
+            let harness = StoreHarness()
+            try await harness.add("projects", "/Users/me/Projects")
+
+            #expect(try await harness.store.lease(covering: URL(filePath: "/users/me/projects/App")) == nil)
+            #expect(try await harness.store.key(matching: URL(filePath: "/users/me/projects")) == nil)
+        }
+
         @Test func fallsBackToAShallowerItemWhenTheDeepestFails() async throws {
             let harness = StoreHarness(policy: StorePolicy(validators: []))
             try await harness.add("home", "/Users/me")

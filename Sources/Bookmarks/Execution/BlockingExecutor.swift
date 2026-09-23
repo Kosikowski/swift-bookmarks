@@ -4,8 +4,9 @@ import Synchronization
 /// Runs blocking work on dedicated threads, away from the main actor and the cooperative pool.
 ///
 /// Bookmark calls can block on volume mounts, network shares and system agents, and can't be
-/// cancelled. When a caller is cancelled or its timeout expires, it stops waiting and the work
-/// finishes in the background with its result discarded.
+/// cancelled. When a caller is cancelled or its timeout expires, it stops waiting. Work that
+/// has started finishes in the background with its result discarded; work still queued is
+/// skipped, so callers that gave up don't hold the executor's threads.
 public final class BlockingExecutor: Sendable {
     /// Thrown to the waiting caller when the timeout expires first.
     public struct TimeoutError: Error, Sendable, Equatable {
@@ -38,6 +39,7 @@ public final class BlockingExecutor: Sendable {
             try await withCheckedThrowingContinuation { continuation in
                 resumer.install(continuation)
                 queue.addOperation {
+                    guard !resumer.isSettled else { return }
                     resumer.resume(with: Result { try work() })
                 }
                 if let timeout {
@@ -72,6 +74,16 @@ private final class OneShot<T: Sendable>: Sendable {
     }
 
     private let state = Mutex<State>(.idle)
+
+    /// Whether the waiter already has its answer, such as a timeout, so the work is moot.
+    var isSettled: Bool {
+        state.withLock { state in
+            switch state {
+            case .idle, .waiting: false
+            case .pending, .finished: true
+            }
+        }
+    }
 
     func install(_ continuation: CheckedContinuation<T, any Error>) {
         let early: Result<T, any Error>? = state.withLock { state in

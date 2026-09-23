@@ -1,5 +1,5 @@
 /// A change to a store's records.
-public enum StoreChange<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: Sendable {
+public enum StoreChange<Key: Hashable & Sendable, Metadata: Sendable>: Sendable {
     /// A record was added at the end of the order.
     case added(BookmarkRecord<Key, Metadata>)
     /// A record changed. Its position is unchanged.
@@ -11,7 +11,7 @@ public enum StoreChange<Key: Hashable & Sendable & Codable, Metadata: Sendable &
 }
 
 /// What a subscriber to ``BookmarkStore/updates(bufferingPolicy:)`` receives.
-public enum StoreUpdate<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: Sendable {
+public enum StoreUpdate<Key: Hashable & Sendable, Metadata: Sendable>: Sendable {
     /// Every record in order, delivered first.
     case snapshot([BookmarkRecord<Key, Metadata>])
     /// A change made after the snapshot.

@@ -76,14 +76,29 @@ public struct SystemBookmarkEngine: FileSystemEngine {
     }
 
     public func itemInfo(at url: URL) -> ItemInfo? {
-        guard let values = try? url.uncachedResourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else {
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .volumeSupportsCaseSensitiveNamesKey]
+        guard let values = try? url.uncachedResourceValues(forKeys: keys) else {
             return nil
         }
         return ItemInfo(
             isDirectory: values.isDirectory ?? false,
             isSymbolicLink: values.isSymbolicLink ?? false,
-            canonicalPath: NormalizedPath(url.resolvingSymlinksInPath()).string
+            canonicalPath: NormalizedPath(url.resolvingSymlinksInPath()).string,
+            namesAreCaseSensitive: values.volumeSupportsCaseSensitiveNames ?? true
         )
+    }
+
+    public func namesAreCaseSensitive(at url: URL) -> Bool {
+        var components = NormalizedPath(url).components
+        while true {
+            let candidate = URL(filePath: "/" + components.joined(separator: "/"))
+            if FileManager.default.fileExists(atPath: candidate.path(percentEncoded: false)) {
+                let values = try? candidate.uncachedResourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+                return values?.volumeSupportsCaseSensitiveNames ?? true
+            }
+            guard !components.isEmpty else { return true }
+            components.removeLast()
+        }
     }
 
     public func writeAliasFile(_ data: BookmarkData, to url: URL) throws {

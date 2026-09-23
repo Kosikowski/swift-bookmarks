@@ -1,10 +1,13 @@
 public import Foundation
+import Synchronization
 
 /// A URL the system handed to the app, together with where it came from.
 ///
-/// The origin decides whether the system already started security-scoped access for the URL,
-/// which the library balances when it adopts the grant.
-public struct Grant: Sendable, Hashable {
+/// The origin decides whether the system already started security-scoped access for the URL.
+/// A grant is used once: adopting it or relinquishing it balances that access, and later
+/// attempts do nothing. A grant released without either balances the access itself, so
+/// ignoring what a picker returned doesn't leak a scope.
+public final class Grant: Sendable {
     /// Where a granted URL came from.
     public enum Origin: String, Sendable, Hashable, Codable, CaseIterable {
         /// `NSOpenPanel`. Access is already started on macOS.
@@ -34,14 +37,53 @@ public struct Grant: Sendable, Hashable {
     /// Where the URL came from.
     public let origin: Origin
 
-    /// Creates a grant.
-    public init(url: URL, origin: Origin) {
+    private let startedBySystem: Bool
+    private let stopAccessing: @Sendable (URL) -> Void
+    private let consumed = Atomic<Bool>(false)
+
+    /// Creates a grant for a URL the system handed to this process.
+    public convenience init(url: URL, origin: Origin) {
+        self.init(url: url, origin: origin, platform: SandboxEnvironment.current.platform) { url in
+            url.stopAccessingSecurityScopedResource()
+        }
+    }
+
+    /// Creates a grant whose unused system start is balanced by `stopAccessing`, for engines
+    /// other than the system's.
+    public init(
+        url: URL,
+        origin: Origin,
+        platform: SandboxEnvironment.Platform,
+        stopAccessing: @escaping @Sendable (URL) -> Void
+    ) {
         self.url = url
         self.origin = origin
+        self.stopAccessing = stopAccessing
+        startedBySystem = Self.isStartedBySystem(origin, on: platform)
+    }
+
+    deinit {
+        if claim(), startedBySystem {
+            stopAccessing(url)
+        }
+    }
+
+    /// Whether the grant has been adopted or relinquished.
+    public var isConsumed: Bool {
+        consumed.load(ordering: .acquiring)
+    }
+
+    /// Marks the grant used. Returns `false` when it already was.
+    func claim() -> Bool {
+        !consumed.exchange(true, ordering: .acquiringAndReleasing)
     }
 
     /// Whether the system started access for the URL before handing it over on `platform`.
     public func isStartedBySystem(on platform: SandboxEnvironment.Platform) -> Bool {
+        Self.isStartedBySystem(origin, on: platform)
+    }
+
+    private static func isStartedBySystem(_ origin: Origin, on platform: SandboxEnvironment.Platform) -> Bool {
         switch origin {
         case .openPanel, .savePanel, .appKitDrop, .finderOpen:
             platform == .macOS || platform == .macCatalyst

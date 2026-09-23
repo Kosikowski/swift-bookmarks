@@ -238,6 +238,17 @@ struct SystemEngineTests {
             #expect(engine.recordedValues(in: BookmarkData(Data("garbage".utf8))) == nil)
         }
 
+        @Test func caseSensitivityComesFromTheNearestExistingItem() throws {
+            defer { sandbox.remove() }
+            let folder = try sandbox.makeDirectory("Folder")
+            let values = try folder.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+            let expected = try #require(values.volumeSupportsCaseSensitiveNames)
+
+            #expect(engine.namesAreCaseSensitive(at: folder) == expected)
+            #expect(engine.namesAreCaseSensitive(at: folder.appending(path: "Missing/Deeper")) == expected)
+            #expect(try #require(engine.itemInfo(at: folder)).namesAreCaseSensitive == expected)
+        }
+
         @Test func reportsWhetherItemsExist() throws {
             defer { sandbox.remove() }
             let folder = try sandbox.makeDirectory("Folder")

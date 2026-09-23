@@ -22,7 +22,12 @@ struct Probes: Sendable {
             engine.stopAccessing(grant.url)
             observations.append(ProbeResult(probe: name, detail: "Readable after balancing our start: \(canRead(grant.url))"))
         }
-        engine.stopAccessing(grant.url)
+        if grant.isStartedBySystem(on: engine.environment.platform) {
+            // Exactly one more stop, and the grant won't stop again when it's released.
+            service.relinquish(grant)
+        } else {
+            engine.stopAccessing(grant.url)
+        }
         observations.append(ProbeResult(probe: name, detail: "Readable after one more stop: \(canRead(grant.url))"))
         return observations
     }

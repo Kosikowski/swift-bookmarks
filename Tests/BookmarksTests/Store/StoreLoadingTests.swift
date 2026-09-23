@@ -45,6 +45,48 @@ struct StoreLoadingTests {
         #expect(try await harness.store.keys() == ["a"])
     }
 
+    @Suite("Sharing persistence")
+    struct SharingPersistence {
+        @Test func aChangeKeepsWhatAnotherProcessSaved() async throws {
+            let harness = StoreHarness(records: [StoreLoadingTests.record("a")])
+            try await harness.store.load()
+            let changes = try await harness.store.updates()
+            harness.persistence.replaceStoredRecords([StoreLoadingTests.record("a"), StoreLoadingTests.record("elsewhere")])
+
+            try await harness.store.updateMetadata("a") { $0.name = "renamed" }
+
+            #expect(harness.saved.map(\.key) == ["a", "elsewhere"])
+            #expect(harness.saved.first?.metadata.name == "renamed")
+            #expect(try await harness.store.keys() == ["a", "elsewhere"])
+            #expect(await collect(changes, count: 2) == ["added elsewhere", "updated a"])
+        }
+
+        @Test func aChangeSeesRecordsAnotherProcessRemoved() async throws {
+            let harness = StoreHarness(records: [StoreLoadingTests.record("a"), StoreLoadingTests.record("b")])
+            try await harness.store.load()
+            harness.persistence.replaceStoredRecords([StoreLoadingTests.record("b")])
+
+            let error = await #expect(throws: TestStore.Failure.self) {
+                try await harness.store.updateMetadata("a") { $0.name = "renamed" }
+            }
+
+            guard case .notFound("a") = error else {
+                Issue.record("Expected notFound, got \(String(describing: error))")
+                return
+            }
+            #expect(harness.saved.map(\.key) == ["b"])
+        }
+
+        @Test func aChangeThatLeavesTheRecordsAsStoredDoesntSave() async throws {
+            let harness = StoreHarness(records: [StoreLoadingTests.record("a")])
+            try await harness.store.load()
+
+            try await harness.store.updateMetadata("a") { $0.name = "a" }
+
+            #expect(harness.persistence.saveCount == 0)
+        }
+    }
+
     @Suite("Reloading")
     struct Reloading {
         @Test func publishesWhatAnotherProcessChanged() async throws {

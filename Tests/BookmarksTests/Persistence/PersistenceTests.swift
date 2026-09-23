@@ -65,7 +65,7 @@ struct PersistedEnvelopeTests {
     @Test func roundTrips() throws {
         let data = try Envelope.encode(sampleRecords(), pretty: true)
 
-        #expect(try Envelope.decode(data) == sampleRecords())
+        #expect(try Envelope.decode(data).records == sampleRecords())
     }
 
     @Test func reportsMetadataThatCantBeEncoded() {
@@ -84,11 +84,48 @@ struct PersistedEnvelopeTests {
         #expect(error?.reason == .unsupportedSchemaVersion(2))
     }
 
-    @Test(arguments: ["not json", "{}", #"{"schemaVersion": 1}"#, #"{"schemaVersion": 1, "records": [{"key": 1}]}"#])
+    @Test(arguments: ["not json", "{}", #"{"schemaVersion": 1}"#, #"{"schemaVersion": 1, "records": 3}"#])
     func reportsUnreadableData(_ text: String) {
         let error = #expect(throws: PersistenceError.self) { try Envelope.decode(Data(text.utf8)) }
 
         #expect(error?.reason == .unreadable)
+    }
+
+    @Test func keepsRecordsItCantReadVerbatim() throws {
+        let data = try Envelope.encode(sampleRecords(), pretty: false)
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var records = try #require(object["records"] as? [[String: Any]])
+        records[1]["kind"] = "futureKind"
+        records.append(["key": "c", "fileID": 18_446_744_073_709_551_615 as UInt64])
+        object["records"] = records
+
+        let stored = try Envelope.decode(JSONSerialization.data(withJSONObject: object))
+        let rewritten = try Envelope.decode(Envelope.encode(stored.records, preserving: stored.preserved, pretty: false))
+
+        #expect(stored.records == [sampleRecords()[0]])
+        #expect(stored.preserved.count == 2)
+        #expect(rewritten.preserved == stored.preserved)
+        #expect(stored.preserved.last == .object(["key": .string("c"), "fileID": .unsigned(UInt64.max)]))
+    }
+
+    @Test func aStatusFromANewerVersionDecodesAsUnknown() throws {
+        let data = try Envelope.encode(sampleRecords(), pretty: false)
+        let text = try #require(String(data: data, encoding: .utf8))
+            .replacingOccurrences(of: #""code":"volumeUnavailable""#, with: #""code":"futureFailure""#)
+
+        let stored = try Envelope.decode(Data(text.utf8))
+
+        #expect(stored.records.map(\.status) == [.available, .unknown])
+    }
+
+    @Test func writesKindsAndFailuresAsStableCodes() throws {
+        let data = try Envelope.encode(sampleRecords(), pretty: false)
+        let text = try #require(String(data: data, encoding: .utf8))
+
+        #expect(text.contains(#""kind":"appScoped.readWrite""#))
+        #expect(text.contains(#""kind":"reference""#))
+        #expect(text.contains(#""failure":{"code":"volumeUnavailable","volumeName":"Backup"}"#))
+        #expect(text.contains(#""state":"unavailable""#))
     }
 }
 
@@ -119,6 +156,20 @@ struct UserDefaultsPersistenceTests {
 
     func persistence(_ corruption: CorruptionHandling = .quarantine) -> UserDefaultsPersistence<String, Tag> {
         UserDefaultsPersistence(key: "bookmarks", suiteName: suiteName, corruption: corruption)
+    }
+
+    @Test func aSaveKeepsRecordsWrittenByANewerVersion() throws {
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let persistence = persistence()
+        try persistence.save(sampleRecords())
+        let data = try #require(defaults.data(forKey: "bookmarks"))
+        let text = try #require(String(data: data, encoding: .utf8))
+        defaults.set(Data(text.replacingOccurrences(of: #""kind":"reference""#, with: #""kind":"futureKind""#).utf8), forKey: "bookmarks")
+
+        try persistence.save([])
+
+        #expect(try persistence.load().isEmpty)
+        #expect(String(data: try #require(defaults.data(forKey: "bookmarks")), encoding: .utf8)?.contains("futureKind") == true)
     }
 
     @Test func emptyWhenNothingIsStored() throws {
@@ -196,6 +247,74 @@ struct JSONFilePersistenceTests {
         (try? FileManager.default.contentsOfDirectory(atPath: fileURL.deletingLastPathComponent().path(percentEncoded: false)))?.sorted() ?? []
     }
 
+    @Test func aSaveKeepsRecordsWrittenByANewerVersion() throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+        try persistence.save(sampleRecords())
+        let text = try String(contentsOf: fileURL, encoding: .utf8)
+            .replacingOccurrences(of: #""kind" : "reference""#, with: #""kind" : "futureKind""#)
+        try Data(text.utf8).write(to: fileURL)
+
+        try persistence.save([])
+
+        #expect(try persistence.load().isEmpty)
+        #expect(try String(contentsOf: fileURL, encoding: .utf8).contains("futureKind"))
+    }
+
+    @Test func updatesApplyToWhatAnotherWriterSaved() throws {
+        defer { cleanUp() }
+        let records = sampleRecords()
+        let first = persistence()
+        let second = persistence()
+        try first.save([records[0]])
+
+        try second.update { $0 + [records[1]] }
+
+        #expect(try first.load() == records)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func reportsWritesByOtherWriters() async throws {
+        defer { cleanUp() }
+        let changes = persistence().changes()
+
+        try persistence().save(sampleRecords())
+
+        var iterator = changes.makeAsyncIterator()
+        #expect(await iterator.next() != nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func aStoreFollowsChangesAnotherProcessSaves() async throws {
+        defer { cleanUp() }
+        let records = sampleRecords()
+        let other = persistence()
+        try other.save([records[0]])
+        let store = BookmarkStore(persistence: persistence(), service: Fixtures.service(Fixtures.engine()))
+        let updates = try await store.updates()
+        let following = Task { await store.reload(on: persistence().changes()) }
+        defer { following.cancel() }
+
+        try other.update { $0 + [records[1]] }
+
+        var iterator = updates.makeAsyncIterator()
+        _ = await iterator.next()
+        guard case .change(.added(let added)) = await iterator.next() else {
+            Issue.record("Expected the other process's record to arrive")
+            return
+        }
+        #expect(added == records[1])
+    }
+
+    @Test func anUpdateThatReturnsNothingDoesntWrite() throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+
+        try persistence.update { _ in nil }
+
+        #expect(files().isEmpty)
+    }
+
     @Test func emptyWhenTheFileIsMissing() throws {
         defer { cleanUp() }
 
@@ -230,7 +349,7 @@ struct JSONFilePersistenceTests {
         try persistence.save(sampleRecords())
         try persistence.save([])
 
-        let lastGood = try PersistedEnvelope<String, Tag>.decode(Data(contentsOf: persistence.lastGoodURL))
+        let lastGood = try PersistedEnvelope<String, Tag>.decode(Data(contentsOf: persistence.lastGoodURL)).records
         #expect(lastGood == sampleRecords())
         #expect(persistence.lastGoodURL.lastPathComponent == "bookmarks.json.last-good")
     }
@@ -482,3 +601,15 @@ struct StoreErrorTests {
 
 }
 
+
+struct Unencodable: Codable, Sendable {
+    struct Refusal: Error {}
+
+    init() {}
+
+    init(from decoder: any Decoder) throws {}
+
+    func encode(to encoder: any Encoder) throws {
+        throw Refusal()
+    }
+}

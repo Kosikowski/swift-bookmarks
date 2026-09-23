@@ -15,7 +15,12 @@ final class ScopeHandle: Sendable {
     }
 
     let url: URL
+    /// The URL's path, comparing by the rules of its volume.
+    let path: NormalizedPath
+    /// The access the scope grants, or `nil` for bookmarks that carry none.
+    let access: AccessMode?
     private let engine: any BookmarkEngine
+    private let ledger: ScopeLedger?
     private let state: Mutex<State>
     private let onIdle: (@Sendable (ScopeHandle) -> Void)?
 
@@ -24,10 +29,16 @@ final class ScopeHandle: Sendable {
     init(
         url: URL,
         engine: any BookmarkEngine,
+        ledger: ScopeLedger? = nil,
+        access: AccessMode? = .readWrite,
+        isCaseSensitive: Bool = true,
         alreadyStarted: Bool = false,
         onIdle: (@Sendable (ScopeHandle) -> Void)? = nil
     ) {
         self.url = url
+        self.ledger = ledger
+        self.access = access
+        path = NormalizedPath(url, isCaseSensitive: isCaseSensitive)
         self.engine = engine
         self.onIdle = onIdle
         state = Mutex(State(adoptsSystemStart: alreadyStarted))
@@ -59,7 +70,18 @@ final class ScopeHandle: Sendable {
                 } else {
                     state.didStart = engine.startAccessing(url)
                 }
+                ledger?.activated(self, started: state.didStart)
             }
+            state.holders += 1
+            return Acquisition(didStart: state.didStart, cycle: state.cycle)
+        }
+    }
+
+    /// Joins the current holders, or returns `nil` when there are none, so an idle handle is
+    /// never started again this way.
+    func acquireIfActive() -> Acquisition? {
+        state.withLock { state in
+            guard state.holders > 0 else { return nil }
             state.holders += 1
             return Acquisition(didStart: state.didStart, cycle: state.cycle)
         }
@@ -70,6 +92,7 @@ final class ScopeHandle: Sendable {
             guard state.cycle == cycle, state.holders > 0 else { return false }
             state.holders -= 1
             guard state.holders == 0 else { return false }
+            ledger?.deactivated(self)
             stopIfStarted(&state)
             return true
         }
@@ -82,6 +105,7 @@ final class ScopeHandle: Sendable {
     func invalidate() {
         state.withLock { state in
             if state.holders > 0 {
+                ledger?.deactivated(self)
                 stopIfStarted(&state)
             } else if state.adoptsSystemStart {
                 state.adoptsSystemStart = false
