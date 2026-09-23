@@ -9,7 +9,9 @@ import Synchronization
 /// ``StorePolicy/failureHandling`` says otherwise, and every write includes them.
 ///
 /// The store is safe to use from any thread. Reads and metadata updates are synchronous;
-/// anything that talks to the system is `async` and runs on the bookmark executor.
+/// anything that talks to the system is `async` and runs on the bookmark executor. Reads never
+/// wait for a save in progress, except for the first read, which loads the records. Writes
+/// are serialised, and the persistence must not call back into the store.
 public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: Sendable {
     public typealias Record = BookmarkRecord<Key, Metadata>
     public typealias Failure = BookmarkStoreError<Key>
@@ -25,6 +27,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
 
     private let persistence: any BookmarkPersistence<Key, Metadata>
     private let state = Mutex(State())
+    private let writes = Mutex(())
     private let resolutions = SingleFlight<Key, ResolvedBookmark>()
     private let observers = Mutex<[UUID: AsyncStream<StoreChange<Key>>.Continuation]>([:])
     private let now: @Sendable () -> Date
@@ -277,7 +280,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
             let resolved = try await resolve(snapshot.record, generation: snapshot.generation)
             guard let resolved else {
                 if attempts < 3 { continue }
-                throw .notFound(key)
+                throw .changedDuringAccess(key)
             }
             let lease = registry.lease(for: key, url: resolved.unscopedURL)
             await updateIdentity(of: key, using: lease)
@@ -494,17 +497,15 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     }
 
     private func read<T>(_ body: (State) -> T) throws(Failure) -> T {
-        try state.withLock { state throws(Failure) in
-            try loadIfNeeded(&state)
-            return body(state)
-        }
+        try ensureLoaded()
+        return state.withLock { body($0) }
     }
 
     @discardableResult
     private func mutate<T>(_ body: (inout State) throws(Failure) -> (T, [StoreChange<Key>])) throws(Failure) -> T {
-        let (result, changes) = try state.withLock { state throws(Failure) in
-            try loadIfNeeded(&state)
-            var draft = state
+        try ensureLoaded()
+        let (result, changes) = try writes.withLock { _ throws(Failure) in
+            var draft = state.withLock { $0 }
             let (result, changes) = try body(&draft)
             if !changes.isEmpty {
                 do {
@@ -513,7 +514,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
                     throw .persistence(PersistenceError(wrapping: error, as: .writeFailed))
                 }
             }
-            state = draft
+            state.withLock { $0 = draft }
             return (result, changes)
         }
         for change in changes {
@@ -525,19 +526,24 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
         return result
     }
 
-    private func loadIfNeeded(_ state: inout State) throws(Failure) {
-        guard !state.loaded else { return }
-        let loaded: [Record]
-        do {
-            loaded = try persistence.load()
-        } catch {
-            throw .persistence(PersistenceError(wrapping: error, as: .readFailed))
+    private func ensureLoaded() throws(Failure) {
+        guard !state.withLock({ $0.loaded }) else { return }
+        try writes.withLock { _ throws(Failure) in
+            guard !state.withLock({ $0.loaded }) else { return }
+            let loaded: [Record]
+            do {
+                loaded = try persistence.load()
+            } catch {
+                throw .persistence(PersistenceError(wrapping: error, as: .readFailed))
+            }
+            state.withLock { state in
+                for record in loaded where state.records[record.key] == nil {
+                    state.records[record.key] = record
+                    state.order.append(record.key)
+                }
+                state.loaded = true
+            }
         }
-        for record in loaded where state.records[record.key] == nil {
-            state.records[record.key] = record
-            state.order.append(record.key)
-        }
-        state.loaded = true
     }
 
     private func publish(_ changes: [StoreChange<Key>]) {

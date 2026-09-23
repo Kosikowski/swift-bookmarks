@@ -27,11 +27,14 @@ public struct DocumentBookmarks: Sendable {
 
     /// Creates a bookmark to a granted file, anchored on the document.
     ///
-    /// Fails with ``BookmarkFailure/unsupported(reason:)`` when the document isn't a file,
-    /// and with ``BookmarkFailure/refused(_:)`` when the target isn't a file.
+    /// The grant is relinquished whether or not creation succeeds. Fails with
+    /// ``BookmarkFailure/unsupported(reason:)`` when the document isn't a file, and with
+    /// ``BookmarkFailure/refused(_:)`` when the target isn't a file.
     public func create(for grant: Grant) async throws(BookmarkError) -> BookmarkData {
-        try await checkDocument()
-        return try await bookmarks.create(for: grant, kind: kind, relativeTo: document, validators: [.fileOnly])
+        try await bookmarks.consuming(grant) { () throws(BookmarkError) -> BookmarkData in
+            try await checkDocument()
+            return try await bookmarks.create(for: grant, kind: kind, relativeTo: document, validators: [.fileOnly])
+        }
     }
 
     /// Resolves a bookmark created by ``create(for:)``, refreshing it when stale.

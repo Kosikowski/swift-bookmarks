@@ -12,6 +12,8 @@ public enum BookmarkStoreError<Key: Hashable & Sendable>: Error, Sendable {
     case differentItem(Key)
     /// Loading or saving the records failed.
     case persistence(PersistenceError)
+    /// The record kept changing while it was being resolved. Try again.
+    case changedDuringAccess(Key)
 
     /// The bookmark failure, when the error comes from creating or resolving a bookmark.
     public var bookmarkFailure: BookmarkFailure? {
@@ -27,6 +29,7 @@ extension BookmarkStoreError: LocalizedError {
         case .notFound: "The item isn't stored."
         case .differentItem: "A different item was chosen."
         case .persistence(let error): error.errorDescription
+        case .changedDuringAccess: "The item changed while it was being opened. Try again."
         }
     }
 }

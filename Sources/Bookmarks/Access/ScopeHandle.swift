@@ -27,6 +27,14 @@ final class ScopeHandle: Sendable {
         state = Mutex(State(adoptsSystemStart: alreadyStarted))
     }
 
+    deinit {
+        state.withLock { state in
+            if state.adoptsSystemStart {
+                engine.stopAccessing(url)
+            }
+        }
+    }
+
     func onIdle(_ handler: @escaping @Sendable (ScopeHandle) -> Void) {
         idleHandler.withLock { $0 = handler }
     }

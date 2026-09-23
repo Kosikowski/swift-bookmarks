@@ -395,6 +395,10 @@ Where the code differs from the sketches above:
 - **Validators** run inside `Bookmarks.adopt` and `Bookmarks.create`, while access to the item is held, through `validators:` and `context:` parameters. They inspect items through `BookmarkEngine.itemInfo(at:)`.
 - **Grant origins:** `Grant.isStartedBySystem(on:)` takes the platform, so tests can check every platform on one machine.
 - **Store:** a `Mutex`-based `final class` (the open question in §14). Reads, metadata updates, reordering and forgetting are synchronous; anything that talks to the system is `async`. Errors are `BookmarkStoreError<Key>`. The resolution policy comes from `StorePolicy.resolution`, not a per-call argument, and the store never lets resolution start implicit access.
+- **Store locking:** the in-memory state and the write path have separate locks. Writes, including persistence I/O, are serialised on the write lock; reads only take the state lock, so they never wait for a save. Persistence must not call back into the store. A lease whose record keeps changing during resolution fails with `BookmarkStoreError.changedDuringAccess` rather than `.notFound`.
+- **Grants consumed by helpers:** `DocumentBookmarks.create(for:)` and `AliasFiles.write(aliasTo:at:)` relinquish their grant whether or not they succeed, like `adopt`. `Bookmarks.relinquish(_:)` also takes a sequence, for the rejected items of a multi-item drop or panel.
+- **Implicit starts:** a resolved bookmark whose implicit start was never taken over by a lease stops it when released.
+- **Migrations:** `MigratingPersistence` takes a `MigrationMarker` (`.userDefaults(key:suiteName:)` or custom closures) so a store the user empties isn't refilled from legacy data that wasn't removed. `.cleanUpOnly` relies on the clean-up alone.
 - **Save panels:** there is no `commitWrite()`. Callers write the file first, then create or adopt the bookmark.
 - **Unsandboxed builds** default to `.reference` bookmarks.
 - **System engine:** resource values are read without `URL`'s cache, because cached values hid identity changes after atomic saves.

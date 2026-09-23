@@ -15,8 +15,12 @@ public struct AliasFiles: Sendable {
     }
 
     /// Writes an alias file at `aliasURL` that points to the granted item.
+    ///
+    /// The grant is relinquished whether or not writing succeeds.
     public func write(aliasTo grant: Grant, at aliasURL: URL) async throws(BookmarkError) {
-        let data = try await bookmarks.create(for: grant, kind: .alias)
+        let data = try await bookmarks.consuming(grant) { () throws(BookmarkError) -> BookmarkData in
+            try await bookmarks.create(for: grant, kind: .alias)
+        }
         let engine = bookmarks.engine
         let classifier = bookmarks.classifier
         try await bookmarks.run { () throws(BookmarkError) in

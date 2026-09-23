@@ -132,6 +132,17 @@ public struct Bookmarks: Sendable {
         }
     }
 
+    /// Balances the access the system started for grants that won't be adopted, such as the
+    /// rejected items of a multi-item drop.
+    public func relinquish(_ grants: some Sequence<Grant>) {
+        grants.forEach(relinquish)
+    }
+
+    func consuming<T>(_ grant: Grant, _ body: () async throws(BookmarkError) -> T) async throws(BookmarkError) -> T {
+        defer { relinquish(grant) }
+        return try await body()
+    }
+
     /// Resolves bookmark bytes and refreshes them when they are stale.
     ///
     /// Refreshing happens inside the item's scope, as the system requires. A failed refresh

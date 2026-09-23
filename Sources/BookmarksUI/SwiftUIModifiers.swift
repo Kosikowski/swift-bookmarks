@@ -29,6 +29,7 @@ extension View {
     /// Accepts dropped files and folders and hands them over as grants.
     ///
     /// On macOS the grants are treated as drag-and-drop URLs, whose access the system starts.
+    /// Adopt every grant you keep and pass the rest to `Bookmarks.relinquish(_:)`.
     public func bookmarkDropDestination(onDrop: @escaping ([Grant]) -> Bool) -> some View {
         dropDestination(for: URL.self) { urls, _ in
             onDrop(GrantMapping.grants(from: urls, origin: .drop))
