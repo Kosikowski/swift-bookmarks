@@ -61,18 +61,20 @@ public struct SystemBookmarkEngine: FileSystemEngine {
         url.stopAccessingSecurityScopedResource()
     }
 
-    public func itemExists(atPath path: String) -> Bool {
-        FileManager.default.fileExists(atPath: path)
+    public func isVolumeMounted(atPath path: String) -> Bool {
+        let url = URL(filePath: path, directoryHint: .isDirectory)
+        return (try? url.uncachedResourceValues(forKeys: [.isVolumeKey]))?.isVolume == true
     }
 
     public func fileIdentity(of url: URL) -> FileIdentity? {
         guard
             let values = try? url.uncachedResourceValues(forKeys: [.fileIdentifierKey, .volumeUUIDStringKey]),
-            let fileID = values.fileIdentifier
+            let fileID = values.fileIdentifier,
+            let volumeUUID = values.volumeUUIDString
         else {
             return nil
         }
-        return FileIdentity(volumeUUID: values.volumeUUIDString, fileID: fileID)
+        return FileIdentity(volumeUUID: volumeUUID, fileID: fileID)
     }
 
     public func itemInfo(at url: URL) -> ItemInfo? {

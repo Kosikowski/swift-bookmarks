@@ -9,6 +9,7 @@ public final class ScriptedPersistence<Key: Hashable & Sendable, Metadata: Senda
         var failingLoads: (count: Int, reason: PersistenceError.Reason) = (0, .readFailed)
         var failingSaves: (count: Int, reason: PersistenceError.Reason) = (0, .writeFailed)
         var loadCount = 0
+        var updateCount = 0
         var saveCount = 0
     }
 
@@ -19,7 +20,8 @@ public final class ScriptedPersistence<Key: Hashable & Sendable, Metadata: Senda
         state = Mutex(State(records: records))
     }
 
-    /// Makes the next `count` loads fail with `reason`.
+    /// Makes the next `count` loads fail with `reason`. Updates still succeed; script them with
+    /// ``failSaves(_:reason:)``.
     public func failLoads(_ count: Int, reason: PersistenceError.Reason = .readFailed) {
         state.withLock { $0.failingLoads = (count, reason) }
     }
@@ -42,6 +44,12 @@ public final class ScriptedPersistence<Key: Hashable & Sendable, Metadata: Senda
     /// How many times ``load()`` was called, including failed loads.
     public var loadCount: Int {
         state.withLock { $0.loadCount }
+    }
+
+    /// How many times ``save(_:)`` or ``update(_:)`` was called, including ones that saved
+    /// nothing or failed.
+    public var updateCount: Int {
+        state.withLock { $0.updateCount }
     }
 
     /// How many times ``save(_:)`` or ``update(_:)`` saved records.
@@ -69,6 +77,7 @@ public final class ScriptedPersistence<Key: Hashable & Sendable, Metadata: Senda
         _ transform: ([BookmarkRecord<Key, Metadata>]) -> [BookmarkRecord<Key, Metadata>]?
     ) throws(PersistenceError) {
         let failure = state.withLock { state -> PersistenceError? in
+            state.updateCount += 1
             guard let records = transform(state.records) else { return nil }
             guard state.failingSaves.count > 0 else {
                 state.records = records

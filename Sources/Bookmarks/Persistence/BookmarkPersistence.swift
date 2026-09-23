@@ -48,40 +48,54 @@ public enum CorruptionHandling: Sendable, Hashable {
     case fail
 }
 
-/// Records decoded from the built-in JSON format, plus the ones this version can't read.
+/// Records decoded from the built-in JSON format, plus what this version can't read.
 ///
 /// A record can be unreadable because a newer version of the library or the app wrote a
 /// field value this version doesn't know. Such records are kept verbatim and written back
-/// unchanged, so running an older build never loses them.
+/// unchanged, so running an older build never loses them. Fields a newer version added to a
+/// record this version can read are kept the same way.
 struct StoredRecords<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable> {
     var records: [BookmarkRecord<Key, Metadata>] = []
+    /// Fields of readable records that this version doesn't know, by record key.
+    var unknownFields: [Key: [String: JSONValue]] = [:]
     var preserved: [JSONValue] = []
 }
 
 struct PersistedEnvelope<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: Codable {
     /// Raise only when the envelope itself changes incompatibly. New record fields and new
-    /// enum cases don't need a new version: unreadable records are preserved.
+    /// enum cases don't need a new version: unknown fields and unreadable records are
+    /// preserved.
     static var currentSchemaVersion: Int { 1 }
 
     let schemaVersion: Int
     let records: [Entry]
 
     enum Entry: Codable {
-        case record(BookmarkRecord<Key, Metadata>)
+        case record(BookmarkRecord<Key, Metadata>, unknownFields: [String: JSONValue])
         case unreadable(JSONValue)
 
         init(from decoder: any Decoder) throws {
+            let record: BookmarkRecord<Key, Metadata>
             do {
-                self = .record(try BookmarkRecord(from: decoder))
+                record = try BookmarkRecord(from: decoder)
             } catch {
                 self = .unreadable(try JSONValue(from: decoder))
+                return
             }
+            let fields = (try? [String: JSONValue](from: decoder)) ?? [:]
+            self = .record(record, unknownFields: fields.filter { !BookmarkRecord<Key, Metadata>.fieldNames.contains($0.key) })
         }
 
         func encode(to encoder: any Encoder) throws {
             switch self {
-            case .record(let record): try record.encode(to: encoder)
-            case .unreadable(let value): try value.encode(to: encoder)
+            case .record(let record, let unknownFields):
+                try record.encode(to: encoder)
+                var container = encoder.container(keyedBy: FieldName.self)
+                for (name, value) in unknownFields {
+                    try container.encode(value, forKey: FieldName(name))
+                }
+            case .unreadable(let value):
+                try value.encode(to: encoder)
             }
         }
     }
@@ -107,8 +121,13 @@ struct PersistedEnvelope<Key: Hashable & Sendable & Codable, Metadata: Sendable 
         var stored = StoredRecords<Key, Metadata>()
         for entry in entries {
             switch entry {
-            case .record(let record): stored.records.append(record)
-            case .unreadable(let value): stored.preserved.append(value)
+            case .record(let record, let unknownFields):
+                stored.records.append(record)
+                if !unknownFields.isEmpty {
+                    stored.unknownFields[record.key] = unknownFields
+                }
+            case .unreadable(let value):
+                stored.preserved.append(value)
             }
         }
         if !stored.preserved.isEmpty {
@@ -117,24 +136,43 @@ struct PersistedEnvelope<Key: Hashable & Sendable & Codable, Metadata: Sendable 
         return stored
     }
 
+    /// Encodes `records`, keeping what `stored` holds that this version can't read.
+    ///
+    /// Unknown fields go back on the record with the same key. An unreadable record whose key
+    /// is now used by one of `records` is dropped, so the file never holds a key twice.
     static func encode(
         _ records: [BookmarkRecord<Key, Metadata>],
-        preserving preserved: [JSONValue] = [],
+        over stored: StoredRecords<Key, Metadata> = StoredRecords(),
         pretty: Bool
     ) throws(PersistenceError) -> Data {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = pretty ? [.prettyPrinted, .sortedKeys] : [.sortedKeys]
-        let envelope = Self(
-            schemaVersion: currentSchemaVersion,
-            records: records.map(Entry.record) + preserved.map(Entry.unreadable)
-        )
         do {
+            let keys = try Set(records.map { try JSONValue(encoding: $0.key, with: encoder) })
+            let preserved = stored.preserved.filter { value in
+                guard case .object(let fields) = value, let key = fields["key"] else { return true }
+                return !keys.contains(key)
+            }
+            let envelope = Self(
+                schemaVersion: currentSchemaVersion,
+                records: records.map { .record($0, unknownFields: stored.unknownFields[$0.key] ?? [:]) }
+                    + preserved.map(Entry.unreadable)
+            )
             return try encoder.encode(envelope)
         } catch {
             throw PersistenceError(.writeFailed, underlying: error as NSError)
         }
     }
+}
+
+private struct FieldName: CodingKey {
+    let stringValue: String
+    var intValue: Int? { nil }
+
+    init(_ name: String) { stringValue = name }
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
 }
 
 private struct SchemaProbe: Decodable {

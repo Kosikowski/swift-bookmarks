@@ -115,15 +115,24 @@ struct RecordTableTests {
             #expect(transaction.changes == ["added b", "reordered b,a"])
         }
 
-        @Test func evictsTheLastRecordsButNeverTheKeptOne() {
+        @Test func insertionOrderEvictsTheOldestButNeverTheKeptOne() {
             var table = RecordTableTests.table("a", "b", "c")
 
-            let evicting = RecordTableTests.transaction(&table) { $0.evict(beyond: 1, keeping: "c") }
-            let unlimited = RecordTableTests.transaction(&table) { $0.evict(beyond: nil, keeping: "c") }
+            let evicting = RecordTableTests.transaction(&table) { $0.evict(beyond: 2, keeping: "c", ordering: .insertion) }
+            let unlimited = RecordTableTests.transaction(&table) { $0.evict(beyond: nil, keeping: "c", ordering: .insertion) }
+
+            #expect(evicting.changes == ["removed a"])
+            #expect(evicting.invalidated == ["a"])
+            #expect(unlimited.changes.isEmpty)
+            #expect(table.order == ["b", "c"])
+        }
+
+        @Test func mostRecentlyUsedOrderEvictsTheLeastRecentButNeverTheKeptOne() {
+            var table = RecordTableTests.table("a", "b", "c")
+
+            let evicting = RecordTableTests.transaction(&table) { $0.evict(beyond: 1, keeping: "c", ordering: .mostRecentlyUsed) }
 
             #expect(evicting.changes == ["removed a", "removed b"])
-            #expect(evicting.invalidated == ["a", "b"])
-            #expect(unlimited.changes.isEmpty)
             #expect(table.order == ["c"])
         }
     }

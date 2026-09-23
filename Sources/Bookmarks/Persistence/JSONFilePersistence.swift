@@ -4,8 +4,8 @@ import os
 /// Stores records in a JSON file with atomic, coordinated writes.
 ///
 /// Before each write, the previous file is kept as `<name>.last-good`. Undecodable files are
-/// moved to `<name>.corrupt-<timestamp>` and the last good copy is used instead, when
-/// ``CorruptionHandling/quarantine`` applies. Records this version can't decode, such as ones
+/// copied to `<name>.corrupt-<timestamp>` and the last good copy is restored in their place,
+/// when ``CorruptionHandling/quarantine`` applies. Records this version can't decode, such as ones
 /// written by a newer version, are kept in the file unchanged.
 ///
 /// Several processes can share the file, such as an app and its extensions through an app
@@ -37,7 +37,12 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
         } catch {
             throw PersistenceError(.readFailed, underlying: error as NSError)
         }
-        return try decode(data).records
+        guard let data else { return [] }
+        do {
+            return try PersistedEnvelope<Key, Metadata>.decode(data).records
+        } catch where error.reason == .unreadable && corruption == .quarantine {
+            return try repair()
+        }
     }
 
     public func save(_ records: [BookmarkRecord<Key, Metadata>]) throws(PersistenceError) {
@@ -51,15 +56,9 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
     ) throws(PersistenceError) {
         do {
             try Coordination.write(at: fileURL, options: .forMerging) { url in
-                let data: Data?
-                do {
-                    data = try Self.contents(of: url)
-                } catch {
-                    throw PersistenceError(.readFailed, underlying: error as NSError)
-                }
-                let stored = try decode(data)
+                let stored = try storedRepairing(at: url)
                 guard let records = transform(stored.records) else { return }
-                let encoded = try PersistedEnvelope<Key, Metadata>.encode(records, preserving: stored.preserved, pretty: true)
+                let encoded = try PersistedEnvelope<Key, Metadata>.encode(records, over: stored, pretty: true)
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 if keepsLastGoodCopy, FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
                     try? FileManager.default.removeItem(at: lastGoodURL)
@@ -79,34 +78,75 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
         return try Data(contentsOf: url)
     }
 
-    private func decode(_ data: Data?) throws(PersistenceError) -> StoredRecords<Key, Metadata> {
+    /// Quarantines an unreadable file inside a coordinated write, so the recovered records
+    /// are what the file holds afterwards.
+    private func repair() throws(PersistenceError) -> [BookmarkRecord<Key, Metadata>] {
+        do {
+            return try Coordination.write(at: fileURL, options: .forMerging) { url in
+                try storedRepairing(at: url).records
+            }
+        } catch let error as PersistenceError {
+            throw error
+        } catch {
+            throw PersistenceError(.writeFailed, underlying: error as NSError)
+        }
+    }
+
+    /// The records in the file at `url`, which must be coordinated for writing.
+    ///
+    /// An unreadable file is copied aside when ``CorruptionHandling/quarantine`` applies, then
+    /// replaced with the last good copy, or removed when there is none. Nothing replaces the
+    /// file until its copy exists, so a failure throws and leaves the unreadable bytes in place.
+    private func storedRepairing(at url: URL) throws(PersistenceError) -> StoredRecords<Key, Metadata> {
+        let data: Data?
+        do {
+            data = try Self.contents(of: url)
+        } catch {
+            throw PersistenceError(.readFailed, underlying: error as NSError)
+        }
         guard let data else { return StoredRecords() }
         do {
             return try PersistedEnvelope<Key, Metadata>.decode(data)
         } catch where error.reason == .unreadable && corruption == .quarantine {
-            quarantine()
-            return recoverLastGood()
+            Log.persistence.error("Stored bookmarks in \(url.lastPathComponent, privacy: .public) are unreadable; moving them aside")
+            do {
+                try FileManager.default.copyItem(at: url, to: quarantineURL(for: url))
+                if let lastGood = lastGood() {
+                    try lastGood.data.write(to: url, options: .atomic)
+                    return lastGood.stored
+                }
+                try FileManager.default.removeItem(at: url)
+                return StoredRecords()
+            } catch {
+                throw PersistenceError(.writeFailed, underlying: error as NSError)
+            }
         }
     }
 
-    private func quarantine() {
+    /// A name for the quarantined copy of `url` that no earlier quarantine used.
+    private func quarantineURL(for url: URL) -> URL {
+        let folder = url.deletingLastPathComponent()
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let destination = fileURL.deletingLastPathComponent().appending(path: "\(fileURL.lastPathComponent).corrupt-\(stamp)")
-        Log.persistence.error("Stored bookmarks in \(fileURL.lastPathComponent, privacy: .public) are unreadable; moving them aside")
-        try? FileManager.default.moveItem(at: fileURL, to: destination)
+        var candidate = folder.appending(path: "\(url.lastPathComponent).corrupt-\(stamp)")
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path(percentEncoded: false)) {
+            candidate = folder.appending(path: "\(url.lastPathComponent).corrupt-\(stamp)-\(suffix)")
+            suffix += 1
+        }
+        return candidate
     }
 
-    private func recoverLastGood() -> StoredRecords<Key, Metadata> {
+    /// The last good copy, when one is kept and readable.
+    private func lastGood() -> (data: Data, stored: StoredRecords<Key, Metadata>)? {
         guard
             keepsLastGoodCopy,
             let data = try? Self.contents(of: lastGoodURL),
             let stored = try? PersistedEnvelope<Key, Metadata>.decode(data)
         else {
-            return StoredRecords()
+            return nil
         }
-        return stored
+        return (data, stored)
     }
-
 }
 
 extension JSONFilePersistence {

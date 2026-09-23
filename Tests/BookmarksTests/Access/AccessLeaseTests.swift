@@ -155,6 +155,34 @@ struct AccessLeaseTests {
             #expect(lease.url(forDescendant: URL(filePath: path)) == nil)
         }
 
+        @Test(arguments: ["with space", "100%", "#hash", "what?", "semi;colon", "Cafe\u{301}", "\u{1F4C1}"])
+        func mapsNamesThatNeedEscaping(_ name: String) throws {
+            let lease = lease("/Users/me/Project")
+
+            let child = try #require(lease.url(forDescendant: URL(filePath: "/Users/me/Project/\(name)/file")))
+
+            #expect(child.path(percentEncoded: false) == "/Users/me/Project/\(name)/file")
+            #expect(child.absoluteString.hasPrefix(lease.url.absoluteString))
+        }
+
+        @Test(arguments: ["https://example.com/Users/me/Project/x", "ftp://host/Users/me/Project"])
+        func rejectsURLsThatArentFiles(_ string: String) throws {
+            let lease = lease("/Users/me/Project")
+
+            #expect(lease.url(forDescendant: try #require(URL(string: string))) == nil)
+        }
+
+        @Test func mapsAcrossTheFirmlinkEitherWay() throws {
+            let long = lease("/private/var/folders/x")
+            let short = lease("/var/folders/y")
+
+            let fromShort = try #require(long.url(forDescendant: URL(filePath: "/var/folders/x/a/b")))
+            let fromLong = try #require(short.url(forDescendant: URL(filePath: "/private/var/folders/y/c")))
+
+            #expect(fromShort.path(percentEncoded: false) == "/private/var/folders/x/a/b")
+            #expect(fromLong.path(percentEncoded: false) == "/var/folders/y/c")
+        }
+
         @Test func normalisesDotComponents() {
             let lease = lease("/Users/me/Project")
 

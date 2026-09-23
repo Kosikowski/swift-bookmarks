@@ -17,6 +17,7 @@ struct FakeFileSystem: Sendable {
     var nextItemID: UInt64 = 2
     var mountedVolumes: Set<String> = ["/"]
     var caseInsensitiveVolumes: Set<String> = []
+    var volumesWithoutUUID: Set<String> = []
     var freelyAccessible: Set<String> = []
     var aliasFiles: [String: BookmarkData] = [:]
 
@@ -30,6 +31,7 @@ struct FakeFileSystem: Sendable {
     var creationFailures: [String: ScriptedFailure] = [:]
     var forcedStale: [String: Int] = [:]
     var gates: [String: [FakeBookmarkEngine.Gate]] = [:]
+    var creationGates: [String: [FakeBookmarkEngine.Gate]] = [:]
 
     var calls = FakeBookmarkEngine.Calls()
     var creationRequests: [FakeBookmarkEngine.CreationRequest] = []
@@ -107,10 +109,17 @@ struct FakeFileSystem: Sendable {
         if let parent = Self.parent(of: destination), items[parent] == nil {
             addItem(at: parent, isDirectory: true)
         }
+        // Moving to another volume copies and deletes, so the items get new identities.
+        let acrossVolumes = Self.volume(of: source) != Self.volume(of: destination)
         let moving = items.filter { Self.isDescendant($0.key, of: source) }
-        for (path, item) in moving {
+        for (path, item) in moving.sorted(by: { $0.key < $1.key }) {
             items[path] = nil
-            items[destination + String(path.dropFirst(source.count))] = item
+            var moved = item
+            if acrossVolumes {
+                moved = FakeItem(id: nextItemID, isDirectory: item.isDirectory, linkTarget: item.linkTarget)
+                nextItemID += 1
+            }
+            items[destination + String(path.dropFirst(source.count))] = moved
         }
     }
 

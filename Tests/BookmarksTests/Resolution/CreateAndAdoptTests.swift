@@ -1,6 +1,7 @@
 @testable import Bookmarks
 import BookmarksTesting
 import Foundation
+import Synchronization
 import Testing
 
 @Suite("BookmarkService: create and adopt")
@@ -228,6 +229,39 @@ struct CreateAndAdoptTests {
             #expect(engine.isBalanced)
         }
 
+        @Test func bookmarksStaleOnArrivalKeepTheirRefresh() async throws {
+            engine.addItem(at: "/Users/me/Folder")
+            engine.reportStale("/Users/me/Folder")
+
+            let resolved = try await service.adopt(engine.grant("/Users/me/Folder", origin: .openPanel))
+
+            #expect(resolved.wasStale)
+            let refreshed = try #require(resolved.refreshedData)
+            #expect(resolved.data == refreshed)
+            #expect(resolved.needsPersisting)
+            #expect(try await !service.resolve(refreshed).wasStale)
+            #expect(engine.isBalanced)
+        }
+
+        @Test(.timeLimit(.minutes(1)))
+        func aTimedOutAdoptionKeepsTheGrantUntilCreationEnds() async throws {
+            engine.addItem(at: "/Users/me/Folder")
+            let service = Fixtures.service(engine, timeout: .milliseconds(30))
+            let gate = engine.holdCreation(of: "/Users/me/Folder")
+            let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+
+            let error = await #expect(throws: BookmarkError.self) { try await service.adopt(grant) }
+
+            #expect(error?.failure == .timedOut)
+            #expect(engine.isAccessing("/Users/me/Folder"))
+            #expect(!grant.isConsumed)
+            gate.open()
+            while !grant.isConsumed {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(engine.isBalanced)
+        }
+
         @Test func relinquishDoesNothingForOriginsTheSystemDidNotStart() {
             engine.addItem(at: "/Users/me/Folder")
 
@@ -279,6 +313,78 @@ struct CreateAndAdoptTests {
             #expect(engine.isBalanced)
         }
 
+        @Test(.timeLimit(.minutes(1)))
+        func oneGrantBacksOneCreationAtATime() async throws {
+            engine.addItem(at: "/Users/me/Folder")
+            let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+            let gate = engine.holdCreation(of: "/Users/me/Folder")
+            let service = service
+
+            let first = Task { try await service.adopt(grant) }
+            await gate.waitUntilReached()
+            let error = await #expect(throws: BookmarkError.self) { try await service.adopt(grant) }
+            gate.open()
+            let resolved = try await first.value
+
+            guard case .unsupported = error?.failure else {
+                Issue.record("Expected unsupported, got \(String(describing: error))")
+                return
+            }
+            #expect(engine.calls.creations == 1)
+            resolved.beginAccess().end()
+            #expect(engine.isBalanced)
+        }
+
+        @Test(.timeLimit(.minutes(1)))
+        func relinquishingDuringCreationWaitsForItToEnd() async throws {
+            engine.addItem(at: "/Users/me/Folder")
+            let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+            let gate = engine.holdCreation(of: "/Users/me/Folder")
+            let service = service
+
+            let adoption = Task { try await service.adopt(grant) }
+            await gate.waitUntilReached()
+            service.relinquish(grant)
+
+            #expect(engine.isAccessing("/Users/me/Folder"))
+            #expect(!grant.isConsumed)
+            gate.open()
+            _ = try await adoption.value
+            #expect(grant.isConsumed)
+            #expect(engine.calls.stops == 1)
+            #expect(engine.isBalanced)
+        }
+
+        @Test func aGrantStaysUsableAfterCreatingFromIt() async throws {
+            engine.addItem(at: "/Users/me/Folder")
+            let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+
+            _ = try await service.create(for: grant)
+            #expect(!grant.isConsumed)
+            #expect(engine.isAccessing("/Users/me/Folder"))
+            _ = try await service.adopt(grant)
+
+            #expect(grant.isConsumed)
+            #expect(engine.isBalanced)
+        }
+
+        @Test(.timeLimit(.minutes(1)))
+        func relinquishingDuringCreateUsesUpTheGrantOnceCreationEnds() async throws {
+            engine.addItem(at: "/Users/me/Folder")
+            let grant = engine.grant("/Users/me/Folder", origin: .openPanel)
+            let gate = engine.holdCreation(of: "/Users/me/Folder")
+            let service = service
+
+            let creation = Task { try await service.create(for: grant) }
+            await gate.waitUntilReached()
+            service.relinquish(grant)
+            gate.open()
+            _ = try await creation.value
+
+            #expect(grant.isConsumed)
+            #expect(engine.isBalanced)
+        }
+
         @Test func droppedGrantsBalanceTheSystemStart() {
             engine.addItem(at: "/Users/me/Folder")
 
@@ -306,29 +412,54 @@ struct CreateAndAdoptTests {
     struct Origins {
         @Test(arguments: [Grant.Origin.openPanel, .savePanel, .appKitDrop, .finderOpen])
         func systemStartedOnMacOnly(_ origin: Grant.Origin) {
-            let grant = Grant(url: URL(filePath: "/x"), origin: origin)
-
-            #expect(grant.isStartedBySystem(on: .macOS))
-            #expect(grant.isStartedBySystem(on: .macCatalyst))
-            #expect(!grant.isStartedBySystem(on: .iOS))
-            #expect(!grant.isStartedBySystem(on: .visionOS))
+            #expect(origin.isStartedBySystem(on: .macOS))
+            #expect(origin.isStartedBySystem(on: .macCatalyst))
+            #expect(!origin.isStartedBySystem(on: .iOS))
+            #expect(!origin.isStartedBySystem(on: .visionOS))
         }
 
         @Test(arguments: [Grant.Origin.swiftUIDrop, .fileImporter, .documentPicker, .alreadyAccessible])
         func neverStartedBySystem(_ origin: Grant.Origin) {
-            let grant = Grant(url: URL(filePath: "/x"), origin: origin)
-
             for platform in SandboxEnvironment.Platform.allCases {
-                #expect(!grant.isStartedBySystem(on: platform))
+                #expect(!origin.isStartedBySystem(on: platform))
             }
         }
 
         @Test func implicitBookmarkURLsAreAlwaysStarted() {
-            let grant = Grant(url: URL(filePath: "/x"), origin: .implicitBookmark)
-
             for platform in SandboxEnvironment.Platform.allCases {
-                #expect(grant.isStartedBySystem(on: platform))
+                #expect(Grant.Origin.implicitBookmark.isStartedBySystem(on: platform))
             }
+        }
+
+        @Test func aGrantRecordsWhetherItsPlatformStartedAccess() {
+            let mac = Grant(url: URL(filePath: "/x"), origin: .openPanel, platform: .macOS) { _ in }
+            let iPhone = Grant(url: URL(filePath: "/x"), origin: .openPanel, platform: .iOS) { _ in }
+
+            #expect(mac.isStartedBySystem)
+            #expect(!iPhone.isStartedBySystem)
+        }
+
+        @Test func relinquishingAndReleasingStopThroughTheGrantOnce() {
+            let stops = Mutex(0)
+            let grant = Grant(url: URL(filePath: "/x"), origin: .openPanel, platform: .macOS) { _ in
+                stops.withLock { $0 += 1 }
+            }
+            let service = Fixtures.service(Fixtures.engine())
+
+            service.relinquish(grant)
+            service.relinquish(grant)
+            #expect(grant.isConsumed)
+            #expect(stops.withLock { $0 } == 1)
+        }
+
+        @Test func releasingAnUnusedGrantStopsThroughTheGrant() {
+            let stops = Mutex(0)
+            do {
+                _ = Grant(url: URL(filePath: "/x"), origin: .finderOpen, platform: .macCatalyst) { _ in
+                    stops.withLock { $0 += 1 }
+                }
+            }
+            #expect(stops.withLock { $0 } == 1)
         }
     }
 }

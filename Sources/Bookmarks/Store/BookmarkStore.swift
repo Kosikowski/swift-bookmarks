@@ -85,7 +85,10 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         let task = loading ?? Task { await loadFromPersistence() }
         loading = task
         let result = await task.value
-        loading = nil
+        // Only the load this caller waited for is cleared, not one started after it failed.
+        if loading == task {
+            loading = nil
+        }
         guard !isLoaded else { return }
         switch result {
         case .success(let records):
@@ -100,7 +103,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     /// process changed them.
     public func reload() async throws(Failure) {
         try await load()
-        let (changes, invalidated) = try await writes.withLock { () async throws(Failure) in
+        try await writes.withLock { () async throws(Failure) in
             let records: [Record]
             switch await loadFromPersistence() {
             case .success(let loaded): records = loaded
@@ -108,9 +111,9 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             }
             let old = table
             table.replaceAll(with: records)
-            return table.takeChanges(since: old)
+            let (changes, invalidated) = table.takeChanges(since: old)
+            finish(changes, invalidating: invalidated)
         }
-        finish(changes, invalidating: invalidated)
     }
 
     /// Reloads each time `changes` yields, until it ends or the calling task is cancelled.
@@ -185,10 +188,11 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
 
     /// Adopts a granted item and stores it under `key`, replacing any record for `key`.
     ///
-    /// The grant is relinquished whether or not adding succeeds.
+    /// When the item is already stored under another key, ``StorePolicy/duplicates`` decides
+    /// what happens. The grant is relinquished whether or not adding succeeds.
     @discardableResult
     public func add(_ grant: Grant, key: Key, metadata: Metadata) async throws(Failure) -> Record {
-        let context = try await validationContext(excluding: key, relinquishing: grant)
+        let context = try await prepare(grant, excluding: key)
         let resolved = try await adopt(grant, context: context)
         let location = resolved.handle.path
         let path = location.string
@@ -197,8 +201,15 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             if policy.duplicates != .allow,
                let existing = table.duplicate(of: resolved.fileIdentity, path: location, excluding: key) {
                 guard policy.duplicates == .returnExisting else { throw .duplicate(of: existing.key) }
-                table.promote(existing.key, ordering: policy.ordering)
-                return existing
+                return table.replaceItem(
+                    of: existing.key,
+                    data: resolved.data,
+                    kind: kind,
+                    path: path,
+                    identity: resolved.fileIdentity,
+                    date: timestamp,
+                    ordering: policy.ordering
+                ) ?? existing
             }
             let previous = table[key]
             let record = Record(
@@ -213,28 +224,35 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
                 metadata: metadata
             )
             table.put(record, ordering: policy.ordering)
-            table.evict(beyond: policy.limit, keeping: key)
+            table.evict(beyond: policy.limit, keeping: key, ordering: policy.ordering)
             return record
         }
     }
 
     /// Replaces the bookmark for `key` with a newly granted item, keeping the key and metadata.
     ///
-    /// The grant is relinquished whether or not re-granting succeeds.
+    /// Unless ``StorePolicy/duplicates`` is ``DuplicateHandling/allow``, re-granting an item
+    /// stored under another key fails with ``BookmarkStoreError/duplicate(of:)``. The grant is
+    /// relinquished whether or not re-granting succeeds.
     @discardableResult
     public func regrant(_ key: Key, with grant: Grant) async throws(Failure) -> Record {
-        let context = try await validationContext(excluding: key, relinquishing: grant)
+        let context = try await prepare(grant, excluding: key)
         guard let existing = table[key] else {
             service.relinquish(grant)
             throw .notFound(key)
         }
         let resolved = try await adopt(grant, context: context)
-        if policy.requiresSameItemOnRegrant, let expected = existing.fileIdentity, resolved.fileIdentity != expected {
+        let location = resolved.handle.path
+        if policy.requiresSameItemOnRegrant, !Self.isSameItem(resolved, at: location, as: existing) {
             throw .differentItem(key)
         }
-        let path = NormalizedPath(resolved.url).string
+        let path = location.string
         let timestamp = now()
         return try await mutate { [policy, kind] table throws(Failure) in
+            if policy.duplicates != .allow,
+               let other = table.duplicate(of: resolved.fileIdentity, path: location, excluding: key) {
+                throw .duplicate(of: other.key)
+            }
             guard let record = table.replaceItem(
                 of: key,
                 data: resolved.data,
@@ -353,6 +371,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             do {
                 return try await lease(key)
             } catch {
+                if Task.isCancelled || error.bookmarkFailure == .cancelled { throw error }
                 deepestFailure = deepestFailure ?? error
             }
         }
@@ -386,16 +405,25 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
 
     /// Resolves records that aren't known to be available and updates their status.
     ///
-    /// Call it when a volume mounts or the app becomes active.
+    /// Call it when a volume mounts or the app becomes active. Cancelling the calling task
+    /// stops it before the next record, throwing ``BookmarkFailure/cancelled``.
     ///
-    /// - Returns: The keys that resolved.
+    /// - Returns: The keys that resolved, including ones whose new status failed to save.
     @discardableResult
     public func refreshStatuses() async throws(Failure) -> [Key] {
         try await load()
         let candidates = table.order.compactMap { table.snapshot($0) }.filter { $0.record.status != .available }
         var recovered: [Key] = []
         for snapshot in candidates {
-            if let resolved = try? await resolve(snapshot), await commit(resolved, identity: nil, for: snapshot) {
+            guard !Task.isCancelled else { throw .bookmark(BookmarkError(.cancelled)) }
+            let resolved: ResolvedBookmark
+            do {
+                resolved = try await resolve(snapshot)
+            } catch {
+                if error.bookmarkFailure == .cancelled { throw error }
+                continue
+            }
+            if await commit(resolved, identity: nil, for: snapshot) {
                 recovered.append(snapshot.key)
             }
         }
@@ -416,24 +444,31 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         }
     }
 
+    /// Resolves the snapshot's bookmark, sharing one resolution with concurrent callers.
+    ///
+    /// A failure is recorded once, by the shared resolution, before any caller sees it.
     private func resolve(_ snapshot: Table.Snapshot) async throws(Failure) -> ResolvedBookmark {
+        let flight = Flight(key: snapshot.key, generation: snapshot.generation)
+        let task = sharedResolution(of: snapshot, flight: flight)
         let result: Result<ResolvedBookmark, BookmarkError>
         do {
-            result = try await sharedResolution(of: snapshot).valueUnlessCancelled
+            result = try await task.valueUnlessCancelled
         } catch {
+            leave(flight, of: task)
             throw .bookmark(BookmarkError(.cancelled))
         }
-        switch result {
-        case .success(let resolved):
-            return resolved
-        case .failure(let error):
-            await commit(error.failure, for: snapshot)
-            throw .bookmark(error)
-        }
+        leave(flight, of: task)
+        return try result.mapError(Failure.bookmark).get()
     }
 
-    private func sharedResolution(of snapshot: Table.Snapshot) -> Task<Result<ResolvedBookmark, BookmarkError>, Never> {
-        let flight = Flight(key: snapshot.key, generation: snapshot.generation)
+    /// Stops counting a caller of `task`, unless a later resolution has taken its flight.
+    private func leave(_ flight: Flight, of task: Task<Result<ResolvedBookmark, BookmarkError>, Never>) {
+        guard var resolution = resolutions[flight], resolution.task == task else { return }
+        resolution.callers -= 1
+        resolutions[flight] = resolution
+    }
+
+    private func sharedResolution(of snapshot: Table.Snapshot, flight: Flight) -> Task<Result<ResolvedBookmark, BookmarkError>, Never> {
         if var resolution = resolutions[flight] {
             resolution.callers += 1
             resolutions[flight] = resolution
@@ -448,6 +483,9 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
                 result = .success(try await service.resolve(record.data, kind: record.kind, policy: policy))
             } catch {
                 result = .failure(error)
+                if error.failure != .cancelled {
+                    await commit(error.failure, for: snapshot)
+                }
             }
             resolutions[flight] = nil
             return result
@@ -513,14 +551,32 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         return snapshot
     }
 
-    private func validationContext(excluding key: Key, relinquishing grant: Grant) async throws(Failure) -> ValidationContext {
-        do {
+    /// Loads the records and describes them for validators, relinquishing `grant` on failure.
+    private func prepare(_ grant: Grant, excluding key: Key) async throws(Failure) -> ValidationContext {
+        do throws(Failure) {
+            if kind == .implicit, service.environment.supportsSecurityScope {
+                throw .bookmark(BookmarkError(.unsupported(reason: Self.persistedImplicitReason)))
+            }
             try await load()
             return ValidationContext(existingPaths: table.paths(excluding: key))
         } catch {
             service.relinquish(grant)
             throw error
         }
+    }
+
+    private static var persistedImplicitReason: String {
+        "On macOS, implicit bookmarks grant access to any process that resolves them, so stores don't keep them. Use an app-scoped kind."
+    }
+
+    /// Whether a re-granted item is the stored one: by file identity when both are known, by
+    /// path when only the stored one is, and assumed when the stored record has none.
+    private static func isSameItem(_ resolved: ResolvedBookmark, at location: NormalizedPath, as record: Record) -> Bool {
+        guard let expected = record.fileIdentity else { return true }
+        guard let identity = resolved.fileIdentity else {
+            return location.matches(NormalizedPath(record.lastKnownPath, isCaseSensitive: location.isCaseSensitive))
+        }
+        return identity == expected
     }
 
     /// Applies `body` to the records as stored now and saves the result.
@@ -534,15 +590,16 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         _ body: @escaping @Sendable (inout Table) throws(Failure) -> T
     ) async throws(Failure) -> T {
         try await load()
-        let (result, changes, invalidated) = try await writes.withLock { () async throws(Failure) in
+        return try await writes.withLock { () async throws(Failure) in
             let base = table
             var (result, draft) = try await applyToStored(base, body)
             let (changes, invalidated) = draft.takeChanges(since: base)
             table = draft
-            return (result, changes, invalidated)
+            // Published before the lock is released, so subscribers see changes in the order
+            // they were saved.
+            finish(changes, invalidating: invalidated)
+            return result
         }
-        finish(changes, invalidating: invalidated)
-        return result
     }
 
     private func applyToStored<T: Sendable>(

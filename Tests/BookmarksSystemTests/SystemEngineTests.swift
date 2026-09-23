@@ -218,7 +218,7 @@ struct SystemEngineTests {
             #expect(engine.fileIdentity(of: renamed) == original)
             try Data("b".utf8).write(to: renamed, options: .atomic)
             #expect(engine.fileIdentity(of: renamed) != original)
-            #expect(original.volumeUUID != nil)
+            #expect(!original.volumeUUID.isEmpty)
         }
 
         @Test func describesItems() throws {
@@ -232,10 +232,44 @@ struct SystemEngineTests {
 
             #expect(folderInfo.isDirectory && !folderInfo.isSymbolicLink)
             #expect(linkInfo.isSymbolicLink)
+            // A link describes itself, not its target; the fake engine follows this.
+            #expect(!linkInfo.isDirectory)
             #expect(linkInfo.canonicalPath == sandbox.canonical(folder))
             #expect(engine.itemInfo(at: sandbox.url("Nothing")) == nil)
             #expect(engine.fileIdentity(of: sandbox.url("Nothing")) == nil)
             #expect(engine.recordedValues(in: BookmarkData(Data("garbage".utf8))) == nil)
+        }
+
+        @Test func bookmarksOfALinkRecordTheLinkAndResolveToIt() async throws {
+            defer { sandbox.remove() }
+            let folder = try sandbox.makeDirectory("Folder")
+            let link = sandbox.url("Link")
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder)
+            let service = BookmarkService(engine: engine, executor: BlockingExecutor(label: "system-tests.links", width: 1))
+
+            let data = try await service.create(for: Grant(url: link, origin: .alreadyAccessible), kind: .reference)
+            let resolved = try await service.resolve(data, kind: .reference)
+
+            #expect(engine.recordedValues(in: data)?.path?.hasSuffix("/Link") == true)
+            #expect(resolved.url.lastPathComponent == "Link")
+        }
+
+        @Test func overlapChecksSeeThroughStoredLinks() async throws {
+            defer { sandbox.remove() }
+            let folder = try sandbox.makeDirectory("Folder")
+            let link = sandbox.url("Link")
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder)
+            let service = BookmarkService(engine: engine, executor: BlockingExecutor(label: "system-tests.overlap", width: 1))
+            let context = ValidationContext(existingPaths: [link.path(percentEncoded: false)])
+
+            let error = await #expect(throws: BookmarkError.self) {
+                try await service.create(for: Grant(url: folder, origin: .alreadyAccessible), kind: .reference, validators: [.noOverlap], context: context)
+            }
+
+            guard case .refused(.duplicate) = error?.failure else {
+                Issue.record("Expected a duplicate refusal, got \(String(describing: error))")
+                return
+            }
         }
 
         @Test func caseSensitivityComesFromTheNearestExistingItem() throws {
@@ -249,12 +283,13 @@ struct SystemEngineTests {
             #expect(try #require(engine.itemInfo(at: folder)).namesAreCaseSensitive == expected)
         }
 
-        @Test func reportsWhetherItemsExist() throws {
+        @Test func onlyVolumeRootsAreMountedVolumes() throws {
             defer { sandbox.remove() }
             let folder = try sandbox.makeDirectory("Folder")
 
-            #expect(engine.itemExists(atPath: folder.path(percentEncoded: false)))
-            #expect(!engine.itemExists(atPath: sandbox.url("Nothing").path(percentEncoded: false)))
+            #expect(engine.isVolumeMounted(atPath: "/"))
+            #expect(!engine.isVolumeMounted(atPath: folder.path(percentEncoded: false)))
+            #expect(!engine.isVolumeMounted(atPath: sandbox.url("Nothing").path(percentEncoded: false)))
         }
     }
 }

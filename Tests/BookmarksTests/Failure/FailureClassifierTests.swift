@@ -96,4 +96,48 @@ struct FailureClassifierTests {
     @Test func swiftCocoaErrorsAreClassifiedToo() {
         #expect(classifier.classify(CocoaError(.fileNoSuchFile), recorded: nil) == .missing)
     }
+
+    @Test func aFolderLeftWhereAVolumeWasMountedIsNotProofOfMissing() throws {
+        let leftover = FileManager.default.temporaryDirectory.appending(path: "swift-bookmarks-mount-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: leftover) }
+        let engine = SystemBookmarkEngine()
+        let classifier = FailureClassifier { engine.isVolumeMounted(atPath: $0) }
+        let recorded = RecordedValues(path: leftover.appending(path: "Item").path(percentEncoded: false), volumePath: leftover.path(percentEncoded: false), volumeName: "Backup")
+
+        #expect(classifier.classify(cocoa(.fileNoSuchFile), recorded: recorded) == .volumeUnavailable(name: "Backup"))
+    }
+
+    @Test func readUnknownWrappingATimeoutTimesOut() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnknownError, userInfo: [NSUnderlyingErrorKey: posix(ETIMEDOUT)])
+
+        #expect(classifier.classify(error, recorded: nil) == .timedOut)
+    }
+
+    @Test func readUnknownWrappingNoEntryFollowsTheVolumeRules() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnknownError, userInfo: [NSUnderlyingErrorKey: posix(ENOENT)])
+        let recorded = RecordedValues(volumePath: "/Volumes/Backup", volumeName: "Backup")
+
+        #expect(classifier.classify(error, recorded: recorded) == .volumeUnavailable(name: "Backup"))
+        #expect(classifier.classify(error, recorded: nil) == .missing)
+    }
+
+    @Test func readUnknownWrappingAnUnknownErrorIsStillDenied() {
+        let error = NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnknownError, userInfo: [NSUnderlyingErrorKey: NSError(domain: "Inner", code: 2)])
+
+        #expect(classifier.classify(error, recorded: nil) == .denied)
+    }
+
+    @Test func nestedWrappersAreUnwrappedToTheirCause() {
+        let inner = NSError(domain: "Middle", code: 1, userInfo: [NSUnderlyingErrorKey: posix(ETIMEDOUT)])
+        let error = NSError(domain: "Outer", code: 1, userInfo: [NSUnderlyingErrorKey: inner])
+
+        #expect(classifier.classify(error, recorded: nil) == .timedOut)
+    }
+
+    @Test func missingWhenTheRecordedVolumeHasNoPath() {
+        let recorded = RecordedValues(path: "/Volumes/Gone/Item", volumeName: "Gone")
+
+        #expect(classifier.classify(cocoa(.fileNoSuchFile), recorded: recorded) == .missing)
+    }
 }

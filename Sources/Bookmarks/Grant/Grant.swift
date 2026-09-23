@@ -37,9 +37,18 @@ public final class Grant: Sendable {
     /// Where the URL came from.
     public let origin: Origin
 
-    private let startedBySystem: Bool
+    /// Whether the system started access for the URL before handing it over, on the platform
+    /// the grant was created for.
+    public let isStartedBySystem: Bool
     private let stopAccessing: @Sendable (URL) -> Void
-    private let consumed = Atomic<Bool>(false)
+    private let use = Mutex(Use.unused)
+
+    private enum Use {
+        case unused
+        /// A bookmark is being created from the grant.
+        case inUse(relinquishRequested: Bool)
+        case used
+    }
 
     /// Creates a grant for a URL the system handed to this process.
     public convenience init(url: URL, origin: Origin) {
@@ -59,38 +68,127 @@ public final class Grant: Sendable {
         self.url = url
         self.origin = origin
         self.stopAccessing = stopAccessing
-        startedBySystem = Self.isStartedBySystem(origin, on: platform)
+        isStartedBySystem = origin.isStartedBySystem(on: platform)
     }
 
     deinit {
-        if claim(), startedBySystem {
-            stopAccessing(url)
-        }
+        relinquish()
     }
 
     /// Whether the grant has been adopted or relinquished.
     public var isConsumed: Bool {
-        consumed.load(ordering: .acquiring)
+        use.withLock { if case .used = $0 { true } else { false } }
     }
 
-    /// Marks the grant used. Returns `false` when it already was.
+    /// Marks the grant used and balances the access the system started for it. Does nothing
+    /// when the grant was already used.
+    ///
+    /// While a bookmark is being created from the grant, the system's start is still needed,
+    /// so the grant is relinquished when creation ends instead.
+    func relinquish() {
+        let stops = use.withLock { use in
+            switch use {
+            case .unused:
+                use = .used
+                return true
+            case .inUse:
+                use = .inUse(relinquishRequested: true)
+                return false
+            case .used:
+                return false
+            }
+        }
+        balance(stops)
+    }
+
+    /// Reserves the grant for one bookmark creation. Returns `false` when it's already in
+    /// use or used, so one grant never backs two creations at once.
     func claim() -> Bool {
-        !consumed.exchange(true, ordering: .acquiringAndReleasing)
+        use.withLock { use in
+            guard case .unused = use else { return false }
+            use = .inUse(relinquishRequested: false)
+            return true
+        }
     }
 
-    /// Whether the system started access for the URL before handing it over on `platform`.
+    /// Ends the creation that ``claim()`` reserved the grant for, relinquishing it when
+    /// `consuming` or when a relinquish arrived meanwhile, and freeing it for another use
+    /// otherwise.
+    func endUse(consuming: Bool) {
+        let stops = use.withLock { use in
+            guard case .inUse(let relinquishRequested) = use else { return false }
+            guard consuming || relinquishRequested else {
+                use = .unused
+                return false
+            }
+            use = .used
+            return true
+        }
+        balance(stops)
+    }
+
+    /// This is the only place a grant's system start is balanced, whether the grant is
+    /// relinquished, adopted or released.
+    private func balance(_ stops: Bool) {
+        if stops, isStartedBySystem {
+            stopAccessing(url)
+        }
+    }
+}
+
+extension Grant.Origin {
+    /// Whether the system starts access for URLs from this origin on `platform`.
     public func isStartedBySystem(on platform: SandboxEnvironment.Platform) -> Bool {
-        Self.isStartedBySystem(origin, on: platform)
-    }
-
-    private static func isStartedBySystem(_ origin: Origin, on platform: SandboxEnvironment.Platform) -> Bool {
-        switch origin {
+        switch self {
         case .openPanel, .savePanel, .appKitDrop, .finderOpen:
             platform == .macOS || platform == .macCatalyst
         case .implicitBookmark:
             true
         case .swiftUIDrop, .fileImporter, .documentPicker, .alreadyAccessible:
             false
+        }
+    }
+}
+
+/// One bookmark creation's claim on a grant.
+///
+/// The claim ends once, when the creation work finishes, or when the caller gives up before
+/// handing the claim to that work. Work that never runs, because its caller stopped waiting
+/// before it started, releases the claim when it's discarded.
+final class GrantUse: Sendable {
+    let grant: Grant
+    private let consuming: Bool
+    private let handedOff = Atomic(false)
+    private let ended = Atomic(false)
+
+    /// Claims `grant`, or returns `nil` when it's already in use or used.
+    ///
+    /// - Parameter consuming: Whether ending the claim relinquishes the grant, as adopting
+    ///   does, rather than freeing it for another use.
+    init?(claiming grant: Grant, consuming: Bool) {
+        guard grant.claim() else { return nil }
+        self.grant = grant
+        self.consuming = consuming
+    }
+
+    deinit {
+        end()
+    }
+
+    /// Passes the claim to work that ends it when it finishes.
+    func handOff() {
+        handedOff.store(true, ordering: .releasing)
+    }
+
+    func end() {
+        if !ended.exchange(true, ordering: .acquiringAndReleasing) {
+            grant.endUse(consuming: consuming)
+        }
+    }
+
+    func endUnlessHandedOff() {
+        if !handedOff.load(ordering: .acquiring) {
+            end()
         }
     }
 }

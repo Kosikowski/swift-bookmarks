@@ -112,8 +112,13 @@ public struct BookmarkRecord<Key: Hashable & Sendable, Metadata: Sendable>: Send
 }
 
 extension BookmarkRecord: Codable where Key: Codable, Metadata: Codable {
-    private enum CodingKeys: String, CodingKey {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case key, data, kind, lastKnownPath, fileIdentity, status, createdAt, refreshedAt, metadata
+    }
+
+    /// The names of the fields this version reads and writes.
+    static var fieldNames: Set<String> {
+        Set(CodingKeys.allCases.map(\.stringValue))
     }
 
     public init(from decoder: any Decoder) throws {
@@ -122,7 +127,8 @@ extension BookmarkRecord: Codable where Key: Codable, Metadata: Codable {
         data = try container.decode(BookmarkData.self, forKey: .data)
         kind = try container.decode(BookmarkKind.self, forKey: .kind)
         lastKnownPath = try container.decode(String.self, forKey: .lastKnownPath)
-        fileIdentity = try container.decodeIfPresent(FileIdentity.self, forKey: .fileIdentity)
+        // Identities without a volume UUID, as earlier versions wrote them, aren't unique.
+        fileIdentity = (try? container.decodeIfPresent(FileIdentity.self, forKey: .fileIdentity)) ?? nil
         status = try container.decodeIfPresent(RecordStatus.self, forKey: .status) ?? .unknown
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         refreshedAt = try container.decodeIfPresent(Date.self, forKey: .refreshedAt)

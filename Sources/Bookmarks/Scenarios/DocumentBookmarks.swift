@@ -31,10 +31,10 @@ public struct DocumentBookmarks: Sendable {
     /// ``BookmarkFailure/unsupported(reason:)`` when the document isn't a file, and with
     /// ``BookmarkFailure/refused(_:)`` when the target isn't a file.
     public func create(for grant: Grant) async throws(BookmarkError) -> BookmarkData {
-        try await service.consuming(grant) { () throws(BookmarkError) -> BookmarkData in
+        try await service.using(grant, consuming: true) { use throws(BookmarkError) -> BookmarkData in
             try await checkDocument()
-            return try await service.create(
-                for: grant,
+            return try await service.createClaimed(
+                using: use,
                 kind: kind,
                 document: document,
                 keys: [],

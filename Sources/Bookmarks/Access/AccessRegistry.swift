@@ -21,9 +21,10 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
 
     /// A new lease on the item's active access, or `nil` when the item isn't currently leased.
     public func activeLease(for key: Key) -> AccessLease? {
+        // Joining only current holders means a handle that went idle, with its stop issued,
+        // is never started again this way.
         handles.withLock { handles in
-            guard let handle = handles[key], !handle.isIdle else { return nil }
-            return AccessLease(handle: handle)
+            handles[key].flatMap { AccessLease(activeHandle: $0) }
         }
     }
 
@@ -70,17 +71,21 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
         }
     }
 
-    /// A lease on an active item that contains `url`, or `nil` when none does.
+    /// A lease on the deepest active item that contains `url` and grants `access`, or `nil`
+    /// when none does.
     ///
     /// Leasing a covering directory avoids one system start per file, which exhausts the
-    /// kernel's sandbox extension table.
-    public func lease(covering url: URL) -> AccessLease? {
+    /// kernel's sandbox extension table. Items from bookmarks that carry no access, such as
+    /// reference bookmarks, never match.
+    public func lease(covering url: URL, access: AccessMode = .readWrite) -> AccessLease? {
         let target = NormalizedPath(url)
         return handles.withLock { handles in
-            let covering = handles.values
-                .filter { !$0.isIdle && $0.path.contains(target) }
-                .max { $0.path.components.count < $1.path.components.count }
-            return covering.map { AccessLease(handle: $0) }
+            handles.values
+                .filter { $0.access.map { $0.satisfies(access) } ?? false && $0.path.contains(target) }
+                .sorted { $0.path.components.count > $1.path.components.count }
+                .lazy
+                .compactMap { AccessLease(activeHandle: $0) }
+                .first
         }
     }
 

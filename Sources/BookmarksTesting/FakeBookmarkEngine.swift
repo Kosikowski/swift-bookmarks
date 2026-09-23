@@ -38,7 +38,8 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         state.withLock { $0.removeItem(at: path) }
     }
 
-    /// Moves an item and everything inside it. Identities follow the move.
+    /// Moves an item and everything inside it. Identities follow a move within a volume; a
+    /// move to another volume copies and deletes, as the system does, so they change.
     public func moveItem(from source: String, to destination: String) {
         state.withLock { $0.moveItem(from: source, to: destination) }
     }
@@ -66,6 +67,12 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         state.withLock { _ = $0.caseInsensitiveVolumes.insert(path) }
     }
 
+    /// Makes the volume at `path` report no UUID, as some network and FAT volumes do, so its
+    /// items have no file identity.
+    public func removeVolumeUUID(ofVolumeAt path: String) {
+        state.withLock { _ = $0.volumesWithoutUUID.insert(path) }
+    }
+
     /// Marks `path` and everything inside it as reachable without a grant, like the app's container.
     public func makeAccessibleWithoutGrant(_ path: String) {
         state.withLock { _ = $0.freelyAccessible.insert(path) }
@@ -89,7 +96,7 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         }
         state.withLock { state in
             state.issued.insert(path)
-            if grant.isStartedBySystem(on: environment.platform) {
+            if grant.isStartedBySystem {
                 state.recordStart(path)
             }
         }
@@ -122,6 +129,13 @@ public final class FakeBookmarkEngine: FileSystemEngine {
     public func holdResolution(of path: String) -> Gate {
         let gate = Gate()
         state.withLock { $0.gates[path, default: []].append(gate) }
+        return gate
+    }
+
+    /// Blocks the next creation of a bookmark to `path` until the returned gate opens.
+    public func holdCreation(of path: String) -> Gate {
+        let gate = Gate()
+        state.withLock { $0.creationGates[path, default: []].append(gate) }
         return gate
     }
 
@@ -189,6 +203,13 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         relativeTo document: URL?
     ) throws -> BookmarkData {
         let path = url.fakePath
+        let gate = state.withLock { state -> Gate? in
+            guard var gates = state.creationGates[path], !gates.isEmpty else { return nil }
+            let gate = gates.removeFirst()
+            state.creationGates[path] = gates
+            return gate
+        }
+        gate?.block()
         return try state.withLock { state in
             state.calls.creations += 1
             state.creationRequests.append(CreationRequest(path: path, options: options, document: document?.fakePath))
@@ -327,18 +348,16 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         }
     }
 
-    public func itemExists(atPath path: String) -> Bool {
-        state.withLock { state in
-            state.mountedVolumes.contains(path) || state.item(at: path) != nil
-        }
+    public func isVolumeMounted(atPath path: String) -> Bool {
+        state.withLock { $0.mountedVolumes.contains(path) }
     }
 
     public func fileIdentity(of url: URL) -> FileIdentity? {
         let path = url.fakePath
+        let volume = FakeFileSystem.volume(of: path)
         return state.withLock { state in
-            state.item(at: path).map {
-                FileIdentity(volumeUUID: FakeFileSystem.volume(of: path), fileID: $0.id)
-            }
+            guard !state.volumesWithoutUUID.contains(volume) else { return nil }
+            return state.item(at: path).map { FileIdentity(volumeUUID: volume, fileID: $0.id) }
         }
     }
 
@@ -352,8 +371,9 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         return state.withLock { state in
             guard let item = state.item(at: path) else { return nil }
             let canonical = state.canonicalPath(path)
+            // Like the system, a link describes itself, not its target.
             return ItemInfo(
-                isDirectory: item.linkTarget == nil ? item.isDirectory : state.isDirectory(canonical),
+                isDirectory: item.linkTarget == nil && item.isDirectory,
                 isSymbolicLink: item.linkTarget != nil,
                 canonicalPath: canonical,
                 namesAreCaseSensitive: !state.caseInsensitiveVolumes.contains(FakeFileSystem.volume(of: canonical))

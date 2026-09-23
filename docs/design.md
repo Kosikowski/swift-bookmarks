@@ -208,7 +208,7 @@ extension BookmarkService {
 
 - One OS start per **key**, with an internal refcount of leases (R3). The first lease starts, the last `end()` stops.
 - Holds the resolved URL instance for the key so later leases reuse it instead of re-resolving. `lease(for:resolved:)` adopts the scope of a `ResolvedBookmark`, so an implicit start taken during resolution is balanced by the same leases.
-- `lease(covering: url)` returns a lease on an already-open ancestor when one exists (R10).
+- `lease(covering: url, access:)` returns a lease on the deepest already-open ancestor that grants `access` when one exists (R10). It only joins open scopes and never starts one again.
 - `startedScopeCount` for diagnostics. Every scope, from any registry or resolved bookmark, is also counted in a process-wide `ScopeLedger`, which logs a warning past a soft limit (default 500) and answers `lease(covering:access:)` across the whole process, because the kernel's limit is per process.
 - `endAll()` for termination, ordered after caller-supplied shutdown hooks.
 - Leases stay valid while work is in flight: `forget` on the store marks the key for removal and stops access only when the last lease ends.
@@ -306,7 +306,7 @@ Built in:
 
 The store calls `load()` and `update(_:)` on its own serial executor, one at a time, so adapters can do synchronous I/O and a hung volume on the resolution executor never holds up a save.
 
-**Format evolution.** The built-in JSON format must survive a newer build writing it and an older build reading it, for example an extension on an older library sharing an app group. Kinds, failures and statuses encode as stable string codes. Records decode one at a time: a record this version can't decode is kept verbatim and written back unchanged, and a status it doesn't know decodes as `.unknown`. `schemaVersion` changes only when the envelope itself changes incompatibly.
+**Format evolution.** The built-in JSON format must survive a newer build writing it and an older build reading it, for example an extension on an older library sharing an app group. Kinds, failures and statuses encode as stable string codes. Records decode one at a time: a record this version can't decode is kept verbatim and written back unchanged, fields it doesn't know on a record it can decode are written back with that record, and a status it doesn't know decodes as `.unknown`. A readable record replaces an unreadable one with the same key, so a key never appears twice. `schemaVersion` changes only when the envelope itself changes incompatibly.
 
 ## 8. Grants: where URLs come from
 
@@ -405,7 +405,7 @@ The answers feed back into `Grant` intake and the fake engine, so unit tests sta
 
 Where the code differs from the sketches above:
 
-- **Engine:** the seam is three protocols. `BookmarkEngine` creates and resolves bytes and starts and stops scopes, taking Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. `ItemInspecting` answers `itemInfo(at:)`, `fileIdentity(of:)`, `itemExists(atPath:)` and `namesAreCaseSensitive(at:)`, and `AliasFileAccessing` reads and writes alias files. `BookmarkService` takes their composition, `FileSystemEngine`; the registry and scopes need only `BookmarkEngine`, and validation only `ItemInspecting`. Engines must not call back into the library, because starts and stops run under its locks.
+- **Engine:** the seam is three protocols. `BookmarkEngine` creates and resolves bytes and starts and stops scopes, taking Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. `ItemInspecting` answers `itemInfo(at:)`, `fileIdentity(of:)`, `isVolumeMounted(atPath:)` and `namesAreCaseSensitive(at:)`, and `AliasFileAccessing` reads and writes alias files. `BookmarkService` takes their composition, `FileSystemEngine`; the registry and scopes need only `BookmarkEngine`, and validation only `ItemInspecting`. Engines must not call back into the library, because starts and stops run under its locks.
 - **Default kind:** `BookmarkKind.persistentDefault(for:)` takes the environment; the static property uses the current process.
 - **Failures:** `BookmarkFailure` also has `.refused(GrantRefusal)` for validator refusals and `.cancelled` for callers that stop waiting.
 - **Validators** run inside `BookmarkService.adopt` and `create`, while access to the item is held, through `validators:` and `context:` parameters. They inspect items through `BookmarkEngine.itemInfo(at:)`. `.notTooBroad` refuses every top-level folder, other users' homes and second-level system folders as well as the home folder and its ancestors.

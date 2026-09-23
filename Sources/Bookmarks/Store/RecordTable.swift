@@ -148,19 +148,32 @@ struct RecordTable<Key: Hashable & Sendable, Metadata: Sendable & Equatable>: Se
         order.insert(key, at: 0)
     }
 
-    mutating func evict(beyond limit: Int?, keeping key: Key) {
+    /// Removes the least recent records beyond `limit`: the first ones in insertion order, the
+    /// last ones in most-recently-used order.
+    mutating func evict(beyond limit: Int?, keeping key: Key, ordering: RecordOrdering) {
         guard let limit else { return }
-        while order.count > limit, let victim = order.last(where: { $0 != key }) {
+        while order.count > limit {
+            let victim = switch ordering {
+            case .insertion: order.first { $0 != key }
+            case .mostRecentlyUsed: order.last { $0 != key }
+            }
+            guard let victim else { return }
             _ = remove(victim)
         }
     }
 
     mutating func applySuccess(_ resolution: Resolution, to snapshot: Snapshot) -> Outcome {
-        guard isCurrent(snapshot), var record = records[snapshot.key], record.data == resolution.originalData else {
+        // Stored bytes equal to the refreshed ones mean a caller sharing this resolution
+        // already committed it.
+        guard
+            isCurrent(snapshot),
+            var record = records[snapshot.key],
+            record.data == resolution.originalData || record.data == resolution.refreshedData
+        else {
             return .superseded
         }
         let before = record
-        if let refreshed = resolution.refreshedData {
+        if let refreshed = resolution.refreshedData, record.data != refreshed {
             record.data = refreshed
             record.refreshedAt = resolution.date
         }

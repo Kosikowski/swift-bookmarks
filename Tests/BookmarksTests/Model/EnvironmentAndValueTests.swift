@@ -79,7 +79,6 @@ struct RecordedValuesTests {
 struct FileIdentityTests {
     @Test func describesVolumeAndFile() {
         #expect(FileIdentity(volumeUUID: "V", fileID: 7).description == "V:7")
-        #expect(FileIdentity(volumeUUID: nil, fileID: 7).description == "?:7")
     }
 
     @Test func equalityNeedsBothParts() {

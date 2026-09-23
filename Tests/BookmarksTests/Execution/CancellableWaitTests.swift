@@ -42,6 +42,45 @@ struct CancellableWaitTests {
         gate.open()
         _ = await work.value
     }
+
+    @Test(.timeLimit(.minutes(1)))
+    func racingCancellationResumesEveryWaiterOnce() async throws {
+        let gate = AsyncGate()
+        let work = Task { () -> Int in
+            await gate.wait()
+            return 5
+        }
+        await gate.waitForWaiter()
+
+        let waiters = (0..<100).map { _ in Task { try await work.valueUnlessCancelled } }
+        for (index, waiter) in waiters.enumerated() where index.isMultiple(of: 2) {
+            waiter.cancel()
+            if index == 50 {
+                gate.open()
+            }
+        }
+
+        for waiter in waiters {
+            switch await waiter.result {
+            case .success(let value): #expect(value == 5)
+            case .failure(let error): #expect(error is CancellationError)
+            }
+        }
+        for waiter in waiters.enumerated().filter({ !$0.offset.isMultiple(of: 2) }).map(\.element) {
+            #expect(try await waiter.value == 5)
+        }
+    }
+
+    @Test func cancellingAfterTheValueArrivedStillReturnsIt() async throws {
+        let work = Task { 3 }
+        _ = await work.value
+
+        let waiter = Task { try await work.valueUnlessCancelled }
+        let value = try await waiter.value
+        waiter.cancel()
+
+        #expect(value == 3)
+    }
 }
 
 final class AsyncGate: Sendable {

@@ -8,6 +8,11 @@ final class AsyncLock: Sendable {
 
     private let state = Mutex(State())
 
+    /// The number of callers waiting for the lock.
+    var waiterCount: Int {
+        state.withLock { $0.waiters.count }
+    }
+
     nonisolated(nonsending) func withLock<T, E: Error>(_ body: () async throws(E) -> T) async throws(E) -> T {
         await lock()
         defer { unlock() }

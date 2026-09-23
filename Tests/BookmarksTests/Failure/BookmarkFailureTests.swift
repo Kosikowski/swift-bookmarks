@@ -23,11 +23,62 @@ struct BookmarkFailureTests {
     @Test(arguments: [
         BookmarkFailure.missing, .volumeUnavailable(name: "V"), .volumeUnavailable(name: nil), .needsRegrant,
         .denied, .corrupt, .unsupported(reason: "why"), .timedOut, .cancelled, .other(domain: "D", code: 3),
+        .refused(.tooBroad(path: "/")), .refused(.notDirectory(path: "/f")), .refused(.notFile(path: "/d")),
+        .refused(.symbolicLink(path: "/l")), .refused(.duplicate(path: "/a")), .refused(.insideExisting(existing: "/a")),
+        .refused(.containsExisting(existing: "/a/b")), .refused(.doesNotCover(target: "/t")),
+        .refused(.uninspectable(path: "/u")), .refused(.custom("no")),
     ])
     func roundTripsThroughJSON(_ failure: BookmarkFailure) throws {
         let decoded = try JSONDecoder().decode(BookmarkFailure.self, from: JSONEncoder().encode(failure))
 
         #expect(decoded == failure)
+    }
+}
+
+@Suite("BookmarkFailure stored format")
+struct BookmarkFailureStoredFormatTests {
+    /// Stored statuses from earlier versions must keep decoding, so the encoding never changes.
+    @Test(arguments: [
+        (BookmarkFailure.missing, #"{"code":"missing"}"#),
+        (.volumeUnavailable(name: "V"), #"{"code":"volumeUnavailable","volumeName":"V"}"#),
+        (.volumeUnavailable(name: nil), #"{"code":"volumeUnavailable"}"#),
+        (.needsRegrant, #"{"code":"needsRegrant"}"#),
+        (.denied, #"{"code":"denied"}"#),
+        (.corrupt, #"{"code":"corrupt"}"#),
+        (.unsupported(reason: "why"), #"{"code":"unsupported","reason":"why"}"#),
+        (.timedOut, #"{"code":"timedOut"}"#),
+        (.cancelled, #"{"code":"cancelled"}"#),
+        (.other(domain: "D", code: 3), #"{"code":"other","domain":"D","errorCode":3}"#),
+        (.refused(.tooBroad(path: "/")), #"{"code":"refused","refusal":{"tooBroad":{"path":"\/"}}}"#),
+        (.refused(.notDirectory(path: "f")), #"{"code":"refused","refusal":{"notDirectory":{"path":"f"}}}"#),
+        (.refused(.notFile(path: "d")), #"{"code":"refused","refusal":{"notFile":{"path":"d"}}}"#),
+        (.refused(.symbolicLink(path: "l")), #"{"code":"refused","refusal":{"symbolicLink":{"path":"l"}}}"#),
+        (.refused(.duplicate(path: "a")), #"{"code":"refused","refusal":{"duplicate":{"path":"a"}}}"#),
+        (.refused(.insideExisting(existing: "a")), #"{"code":"refused","refusal":{"insideExisting":{"existing":"a"}}}"#),
+        (.refused(.containsExisting(existing: "a")), #"{"code":"refused","refusal":{"containsExisting":{"existing":"a"}}}"#),
+        (.refused(.doesNotCover(target: "t")), #"{"code":"refused","refusal":{"doesNotCover":{"target":"t"}}}"#),
+        (.refused(.uninspectable(path: "u")), #"{"code":"refused","refusal":{"uninspectable":{"path":"u"}}}"#),
+        (.refused(.custom("no")), #"{"code":"refused","refusal":{"custom":{"_0":"no"}}}"#),
+    ])
+    func encodesToAFixedFormat(_ failure: BookmarkFailure, _ json: String) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+
+        #expect(String(data: try encoder.encode(failure), encoding: .utf8) == json)
+        #expect(try JSONDecoder().decode(BookmarkFailure.self, from: Data(json.utf8)) == failure)
+    }
+
+    @Test func unknownCodesFailToDecode() {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(BookmarkFailure.self, from: Data(#"{"code":"future"}"#.utf8))
+        }
+    }
+
+    @Test func missingOptionalFieldsDecodeWithDefaults() throws {
+        let decoder = JSONDecoder()
+
+        #expect(try decoder.decode(BookmarkFailure.self, from: Data(#"{"code":"unsupported"}"#.utf8)) == .unsupported(reason: ""))
+        #expect(try decoder.decode(BookmarkFailure.self, from: Data(#"{"code":"other"}"#.utf8)) == .other(domain: "", code: 0))
     }
 }
 

@@ -100,7 +100,7 @@ struct PersistedEnvelopeTests {
         object["records"] = records
 
         let stored = try Envelope.decode(JSONSerialization.data(withJSONObject: object))
-        let rewritten = try Envelope.decode(Envelope.encode(stored.records, preserving: stored.preserved, pretty: false))
+        let rewritten = try Envelope.decode(Envelope.encode(stored.records, over: stored, pretty: false))
 
         #expect(stored.records == [sampleRecords()[0]])
         #expect(stored.preserved.count == 2)
@@ -126,6 +126,149 @@ struct PersistedEnvelopeTests {
         #expect(text.contains(#""kind":"reference""#))
         #expect(text.contains(#""failure":{"code":"volumeUnavailable","volumeName":"Backup"}"#))
         #expect(text.contains(#""state":"unavailable""#))
+    }
+}
+
+extension PersistedEnvelopeTests {
+    /// The records array of `data`, as JSON objects.
+    func objects(_ data: Data) throws -> [[String: Any]] {
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return try #require(object["records"] as? [[String: Any]])
+    }
+
+    func envelope(_ records: [[String: Any]]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "records": records])
+    }
+
+    @Test func unknownFieldsOfReadableRecordsSurviveARewrite() throws {
+        var records = try objects(Envelope.encode(sampleRecords(), pretty: false))
+        records[0]["pinned"] = true
+        records[0]["labels"] = ["red", "blue"]
+        let stored = try Envelope.decode(envelope(records))
+        var changed = stored.records
+        changed[0].lastKnownPath = "/Users/me/Moved"
+
+        let rewritten = try objects(Envelope.encode(changed, over: stored, pretty: false))
+
+        #expect(stored.records == sampleRecords())
+        #expect(rewritten[0]["pinned"] as? Bool == true)
+        #expect(rewritten[0]["labels"] as? [String] == ["red", "blue"])
+        #expect(rewritten[0]["lastKnownPath"] as? String == "/Users/me/Moved")
+        #expect(rewritten[1]["pinned"] == nil)
+    }
+
+    @Test func unknownFieldsFollowTheirRecordsKey() throws {
+        var records = try objects(Envelope.encode(sampleRecords(), pretty: false))
+        records[1]["pinned"] = true
+        let stored = try Envelope.decode(envelope(records))
+
+        let reordered = try objects(Envelope.encode(stored.records.reversed(), over: stored, pretty: false))
+        let withoutB = try objects(Envelope.encode([stored.records[0]], over: stored, pretty: false))
+
+        #expect(reordered.map { $0["key"] as? String } == ["b", "a"])
+        #expect(reordered[0]["pinned"] as? Bool == true)
+        #expect(withoutB.count == 1)
+        #expect(withoutB[0]["pinned"] == nil)
+    }
+
+    @Test func knownFieldsTheRecordNoLongerHasAreNotResurrected() throws {
+        let stored = try Envelope.decode(Envelope.encode(sampleRecords(), pretty: false))
+        var changed = stored.records
+        changed[0].refreshedAt = nil
+        changed[0].fileIdentity = nil
+
+        let rewritten = try objects(Envelope.encode(changed, over: stored, pretty: false))
+
+        #expect(rewritten[0]["refreshedAt"] == nil)
+        #expect(rewritten[0]["fileIdentity"] == nil)
+    }
+
+    @Test func aReadableRecordReplacesAnUnreadableOneWithTheSameKey() throws {
+        var records = try objects(Envelope.encode([sampleRecords()[0]], pretty: false))
+        records.append(["key": "b", "kind": "futureKind"])
+        records.append(["key": "c", "kind": "futureKind"])
+        let stored = try Envelope.decode(envelope(records))
+
+        let rewritten = try objects(Envelope.encode(sampleRecords(), over: stored, pretty: false))
+
+        #expect(stored.preserved.count == 2)
+        #expect(rewritten.map { $0["key"] as? String } == ["a", "b", "c"])
+        #expect(rewritten[1]["kind"] as? String == "reference")
+    }
+
+    @Test func unreadableRecordsAreWrittenAfterTheReadableOnes() throws {
+        var records = try objects(Envelope.encode(sampleRecords(), pretty: false))
+        records.insert(["key": "x", "kind": "futureKind"], at: 0)
+        let stored = try Envelope.decode(envelope(records))
+
+        let rewritten = try objects(Envelope.encode(stored.records, over: stored, pretty: false))
+
+        #expect(rewritten.map { $0["key"] as? String } == ["a", "b", "x"])
+    }
+
+    @Test(arguments: [
+        ("null", JSONValue.null),
+        ("true", .bool(true)),
+        ("false", .bool(false)),
+        ("0", .int(0)),
+        ("1", .int(1)),
+        ("-1", .int(-1)),
+        ("-9223372036854775808", .int(.min)),
+        ("9223372036854775807", .int(.max)),
+        ("9223372036854775808", .unsigned(9_223_372_036_854_775_808)),
+        ("18446744073709551615", .unsigned(.max)),
+        ("1.5", .double(1.5)),
+        ("-0.25", .double(-0.25)),
+        ("\"text\"", .string("text")),
+        ("\"\"", .string("")),
+        ("[]", .array([])),
+        ("{}", .object([:])),
+        ("[1, [true, null], {\"a\": \"b\"}]", .array([.int(1), .array([.bool(true), .null]), .object(["a": .string("b")])])),
+    ])
+    func preservesEveryKindOfValue(_ json: String, _ expected: JSONValue) throws {
+        let data = Data(#"{"schemaVersion": 1, "records": [{"key": "x", "value": \#(json)}]}"#.utf8)
+
+        let stored = try Envelope.decode(data)
+        let rewritten = try Envelope.decode(Envelope.encode([], over: stored, pretty: false))
+
+        #expect(stored.preserved == [.object(["key": .string("x"), "value": expected])])
+        #expect(rewritten.preserved == stored.preserved)
+    }
+
+    @Test func wholeNumbersWrittenWithAFractionKeepTheirValue() throws {
+        let data = Data(#"{"schemaVersion": 1, "records": [{"key": "x", "value": 2.0}]}"#.utf8)
+
+        let stored = try Envelope.decode(data)
+
+        // JSON doesn't distinguish 2.0 from 2, so only the value is kept.
+        #expect(stored.preserved == [.object(["key": .string("x"), "value": .int(2)])])
+    }
+
+    @Test func numbersBeyondEveryIntegerTypeKeepTheirMagnitude() throws {
+        let data = Data(#"{"schemaVersion": 1, "records": [{"key": "x", "value": 1e300}, {"key": "y", "value": -18446744073709551616}]}"#.utf8)
+
+        let stored = try Envelope.decode(data)
+
+        #expect(stored.preserved == [
+            .object(["key": .string("x"), "value": .double(1e300)]),
+            .object(["key": .string("y"), "value": .double(-18_446_744_073_709_551_616)]),
+        ])
+    }
+
+    @Test(arguments: [
+        #"{"state": "quarantined"}"#,
+        #""available""#,
+        #"{"state": 3}"#,
+        #"{"state": "unavailable", "failure": {"code": "denied"}}"#,
+    ])
+    func statusesThisVersionCantReadDecodeAsUnknown(_ status: String) throws {
+        var records = try objects(Envelope.encode([sampleRecords()[0]], pretty: false))
+        records[0]["status"] = try JSONSerialization.jsonObject(with: Data(status.utf8), options: .fragmentsAllowed)
+
+        let stored = try Envelope.decode(envelope(records))
+
+        #expect(stored.records.map(\.status) == [.unknown])
+        #expect(stored.preserved.isEmpty)
     }
 }
 
@@ -170,6 +313,54 @@ struct UserDefaultsPersistenceTests {
 
         #expect(try persistence.load().isEmpty)
         #expect(String(data: try #require(defaults.data(forKey: "bookmarks")), encoding: .utf8)?.contains("futureKind") == true)
+    }
+
+    @Test func aSaveNeverOverwritesDataFromANewerVersion() {
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let newer = Data(#"{"schemaVersion": 7, "records": []}"#.utf8)
+        defaults.set(newer, forKey: "bookmarks")
+
+        let error = #expect(throws: PersistenceError.self) { try persistence().save(sampleRecords()) }
+
+        #expect(error?.reason == .unsupportedSchemaVersion(7))
+        #expect(defaults.data(forKey: "bookmarks") == newer)
+    }
+
+    @Test func aSaveThatFailsOnUnreadableDataLeavesItAlone() {
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("a string", forKey: "bookmarks")
+
+        let error = #expect(throws: PersistenceError.self) { try persistence(.fail).save(sampleRecords()) }
+
+        #expect(error?.reason == .unreadable)
+        #expect(defaults.string(forKey: "bookmarks") == "a string")
+        #expect(defaults.object(forKey: "bookmarks.corrupted") == nil)
+    }
+
+    @Test func aLaterCorruptionReplacesTheEarlierBackup() throws {
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("first".utf8), forKey: "bookmarks")
+        _ = try persistence().load()
+        defaults.set(Data("second".utf8), forKey: "bookmarks")
+
+        _ = try persistence().load()
+
+        #expect(defaults.data(forKey: "bookmarks.corrupted") == Data("second".utf8))
+    }
+
+    @Test func unknownFieldsSurviveASave() throws {
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        try persistence().save(sampleRecords())
+        let data = try #require(defaults.data(forKey: "bookmarks"))
+        let text = try #require(String(data: data, encoding: .utf8))
+        defaults.set(Data(text.replacingOccurrences(of: #""key":"a""#, with: #""key":"a","pinned":true"#).utf8), forKey: "bookmarks")
+
+        try persistence().update { records in records.map { var record = $0; record.lastKnownPath += "2"; return record } }
+
+        let savedData = try #require(defaults.data(forKey: "bookmarks"))
+        let saved = try #require(String(data: savedData, encoding: .utf8))
+        #expect(saved.contains(#""pinned":true"#))
+        #expect(try persistence().load().map(\.lastKnownPath) == ["/Users/me/A2", "/Volumes/Backup/B2"])
     }
 
     @Test func emptyWhenNothingIsStored() throws {
@@ -292,7 +483,9 @@ struct JSONFilePersistenceTests {
         try other.save([records[0]])
         let store = BookmarkStore(persistence: persistence(), service: Fixtures.service(Fixtures.engine()))
         let updates = try await store.updates()
-        let following = Task { await store.reload(on: persistence().changes()) }
+        // Observe before the other process writes, so its write can't come first.
+        let changes = persistence().changes()
+        let following = Task { await store.reload(on: changes) }
         defer { following.cancel() }
 
         try other.update { $0 + [records[1]] }
@@ -374,7 +567,57 @@ struct JSONFilePersistenceTests {
 
         #expect(recovered == sampleRecords())
         #expect(files().contains { $0.hasPrefix("bookmarks.json.corrupt-") })
-        #expect(!files().contains("bookmarks.json"))
+        #expect(try PersistedEnvelope<String, Tag>.decode(Data(contentsOf: fileURL)).records == sampleRecords())
+    }
+
+    @Test func recoveredRecordsSurviveTheNextChange() throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+        let records = sampleRecords()
+        try persistence.save(records)
+        try persistence.save(records)
+        try Data("garbage".utf8).write(to: fileURL)
+        _ = try persistence.load()
+
+        var seen: [TestRecord] = []
+        try persistence.update { stored in
+            seen = stored
+            return Array(stored.dropLast())
+        }
+
+        #expect(seen == records)
+        #expect(try persistence.load() == [records[0]])
+    }
+
+    @Test func anUpdateRecoversTheLastGoodCopyOfACorruptFile() throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+        let records = sampleRecords()
+        try persistence.save(records)
+        try persistence.save(records)
+        try Data("garbage".utf8).write(to: fileURL)
+
+        var seen: [TestRecord] = []
+        try persistence.update { seen = $0; return nil }
+
+        #expect(seen == records)
+        #expect(try persistence.load() == records)
+    }
+
+    @Test func aStoreKeepsRecoveredRecordsWhenItChanges() async throws {
+        defer { cleanUp() }
+        let records = sampleRecords()
+        try persistence().save(records)
+        try persistence().save(records)
+        try Data("garbage".utf8).write(to: fileURL)
+        let store = TestStore(persistence: persistence(), service: Fixtures.service(Fixtures.engine()))
+
+        #expect(try await store.keys() == ["a", "b"])
+        try await store.updateMetadata("a") { $0.name = "Renamed" }
+
+        #expect(try await store.keys() == ["a", "b"])
+        #expect(try persistence().load().map(\.key) == ["a", "b"])
+        #expect(try persistence().load().first?.metadata.name == "Renamed")
     }
 
     @Test func startsEmptyWhenThereIsNoGoodCopy() throws {
@@ -414,6 +657,167 @@ struct JSONFilePersistenceTests {
         let error = #expect(throws: PersistenceError.self) { try persistence().save(sampleRecords()) }
 
         #expect(error?.reason == .writeFailed)
+    }
+
+    func write(_ text: String) throws {
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: fileURL)
+    }
+
+    func quarantined() -> [String] {
+        files().filter { $0.hasPrefix("bookmarks.json.corrupt-") }
+    }
+
+    @Test func aSaveNeverOverwritesAFileFromANewerVersion() throws {
+        defer { cleanUp() }
+        let newer = #"{"schemaVersion": 3, "records": []}"#
+        try write(newer)
+
+        let error = #expect(throws: PersistenceError.self) { try persistence().save(sampleRecords()) }
+
+        #expect(error?.reason == .unsupportedSchemaVersion(3))
+        #expect(try String(contentsOf: fileURL, encoding: .utf8) == newer)
+        #expect(files() == ["bookmarks.json"])
+    }
+
+    @Test func aSaveThatFailsOnACorruptFileLeavesItAlone() throws {
+        defer { cleanUp() }
+        try write("garbage")
+
+        let error = #expect(throws: PersistenceError.self) { try persistence(.fail).save(sampleRecords()) }
+
+        #expect(error?.reason == .unreadable)
+        #expect(try String(contentsOf: fileURL, encoding: .utf8) == "garbage")
+        #expect(files() == ["bookmarks.json"])
+    }
+
+    @Test(.disabled(if: getuid() == 0, "File permissions don't restrict root"))
+    func aSaveReportsAFileItCantReadInsteadOfReplacingIt() throws {
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fileURL.path(percentEncoded: false))
+            cleanUp()
+        }
+        try persistence().save(sampleRecords())
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: fileURL.path(percentEncoded: false))
+
+        let error = #expect(throws: PersistenceError.self) { try persistence().save([]) }
+
+        #expect(error?.reason == .readFailed)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: fileURL.path(percentEncoded: false))
+        #expect(try persistence().load() == sampleRecords())
+    }
+
+    @Test(.disabled(if: getuid() == 0, "File permissions don't restrict root"))
+    func aQuarantineThatFailsKeepsTheCorruptBytes() throws {
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fileURL.deletingLastPathComponent().path(percentEncoded: false))
+            cleanUp()
+        }
+        try write("garbage")
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: fileURL.deletingLastPathComponent().path(percentEncoded: false))
+
+        let loadError = #expect(throws: PersistenceError.self) { try persistence().load() }
+        let saveError = #expect(throws: PersistenceError.self) { try persistence().save(sampleRecords()) }
+
+        #expect(loadError?.reason == .writeFailed)
+        #expect(saveError?.reason == .writeFailed)
+        #expect(try String(contentsOf: fileURL, encoding: .utf8) == "garbage")
+        #expect(files() == ["bookmarks.json"])
+    }
+
+    @Test func everyCorruptionKeepsItsOwnCopy() throws {
+        defer { cleanUp() }
+        try write("first")
+        _ = try persistence().load()
+        try write("second")
+        _ = try persistence().load()
+
+        let copies = try quarantined().map {
+            try String(contentsOf: fileURL.deletingLastPathComponent().appending(path: $0), encoding: .utf8)
+        }
+
+        #expect(Set(copies) == ["first", "second"])
+    }
+
+    @Test func aCorruptFileWithoutAGoodCopyIsMovedAside() throws {
+        defer { cleanUp() }
+        try write("garbage")
+
+        #expect(try persistence().load().isEmpty)
+
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path(percentEncoded: false)))
+        #expect(quarantined().count == 1)
+    }
+
+    @Test func anEmptyFileIsQuarantined() throws {
+        defer { cleanUp() }
+        try write("")
+
+        #expect(try persistence().load().isEmpty)
+
+        #expect(quarantined().count == 1)
+    }
+
+    @Test func theLastGoodCopyNeverHoldsCorruptBytes() throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+        try persistence.save(sampleRecords())
+        try persistence.save(sampleRecords())
+        try write("garbage")
+
+        try persistence.save([sampleRecords()[0]])
+
+        let lastGood = try PersistedEnvelope<String, Tag>.decode(Data(contentsOf: persistence.lastGoodURL)).records
+        #expect(lastGood == sampleRecords())
+        #expect(try persistence.load() == [sampleRecords()[0]])
+    }
+
+    @Test func anUpdateThatReturnsNothingKeepsTheLastGoodCopy() throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+        try persistence.save(sampleRecords())
+        try persistence.save([])
+        let before = try Data(contentsOf: persistence.lastGoodURL)
+
+        try persistence.update { _ in nil }
+
+        #expect(try Data(contentsOf: persistence.lastGoodURL) == before)
+    }
+
+    @Test(arguments: ["garbage", #"{"schemaVersion": 9, "records": []}"#])
+    func aLastGoodCopyThatCantBeReadStartsEmpty(_ lastGood: String) throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+        try write("garbage")
+        try Data(lastGood.utf8).write(to: persistence.lastGoodURL)
+
+        #expect(try persistence.load().isEmpty)
+
+        #expect(quarantined().count == 1)
+    }
+
+    @Test func aLastGoodCopyIsIgnoredWhenNotKept() throws {
+        defer { cleanUp() }
+        try persistence().save(sampleRecords())
+        try persistence().save(sampleRecords())
+        try write("garbage")
+
+        #expect(try persistence(keepsLastGoodCopy: false).load().isEmpty)
+    }
+
+    @Test func unknownFieldsSurviveAStoreChange() async throws {
+        defer { cleanUp() }
+        try persistence().save(sampleRecords())
+        let text = try String(contentsOf: fileURL, encoding: .utf8)
+            .replacingOccurrences(of: #""key" : "a","#, with: #""key" : "a", "pinned" : true,"#)
+        try Data(text.utf8).write(to: fileURL)
+        let store = TestStore(persistence: persistence(), service: Fixtures.service(Fixtures.engine()))
+
+        try await store.updateMetadata("a") { $0.name = "Renamed" }
+
+        let saved = try String(contentsOf: fileURL, encoding: .utf8)
+        #expect(saved.contains(#""pinned" : true"#))
+        #expect(saved.contains("Renamed"))
     }
 
     @Test func worksAsAStoreBackend() async throws {
@@ -468,7 +872,7 @@ struct MigratingPersistenceTests {
         #expect(try migrating.load().isEmpty)
     }
 
-    @Test func existingRecordsMarkTheMigrationComplete() throws {
+    @Test func existingRecordsSupersedeAndCleanUpTheLegacyData() throws {
         let flag = Flag()
         let counter = CleanUpCounter()
         let migrating = MigratingPersistence(
@@ -480,7 +884,27 @@ struct MigratingPersistenceTests {
 
         #expect(try migrating.load() == [sampleRecords()[1]])
         #expect(flag.isSet)
-        #expect(counter.value == 0)
+        #expect(counter.value == 1)
+
+        _ = try migrating.load()
+        #expect(counter.value == 1)
+    }
+
+    @Test func aCleanUpThatDidntRunAfterAnImportRunsNextTime() throws {
+        let remains = Atomic(true)
+        let base = InMemoryPersistence(records: sampleRecords())
+        let migrating = MigratingPersistence(
+            base: base,
+            marker: MigrationMarker(isComplete: { !remains.load(ordering: .relaxed) }, markComplete: {}),
+            legacy: { sampleRecords() },
+            cleanUp: { remains.store(false, ordering: .relaxed) }
+        )
+
+        #expect(try migrating.load() == sampleRecords())
+
+        let stillRemains = remains.load(ordering: .relaxed)
+        #expect(!stillRemains)
+        #expect(base.saveCount == 0)
     }
 
     @Test(arguments: [nil, [TestRecord]()])
@@ -533,6 +957,77 @@ struct MigratingPersistenceTests {
         #expect(try migrating.load().isEmpty)
     }
 
+    @Test func anUpdateBeforeAnyLoadRunsTheMigrationFirst() throws {
+        let base = InMemoryPersistence<String, Tag>()
+        let counter = CleanUpCounter()
+        let flag = Flag()
+        let migrating = MigratingPersistence(base: base, marker: flag.marker, legacy: { sampleRecords() }, cleanUp: { counter.increment() })
+
+        var seen: [TestRecord] = []
+        try migrating.update { seen = $0; return Array($0.dropFirst()) }
+
+        #expect(seen == sampleRecords())
+        #expect(base.storedRecords == [sampleRecords()[1]])
+        #expect(counter.value == 1)
+        #expect(flag.isSet)
+    }
+
+    @Test func aFailedLegacyReadFailsTheUpdateWithoutWriting() {
+        let base = ScriptedPersistence<String, Tag>()
+        let flag = Flag()
+        let migrating = MigratingPersistence(
+            base: base,
+            marker: flag.marker,
+            legacy: { () throws(PersistenceError) -> [TestRecord]? in throw PersistenceError(.readFailed) }
+        )
+        var called = false
+
+        let error = #expect(throws: PersistenceError.self) { try migrating.update { called = true; return $0 } }
+
+        #expect(error?.reason == .readFailed)
+        #expect(!called)
+        #expect(base.updateCount == 0)
+        #expect(!flag.isSet)
+    }
+
+    @Test func updatesAfterTheMigrationNeverReadTheLegacyDataAgain() throws {
+        let reads = CleanUpCounter()
+        let migrating = MigratingPersistence(
+            base: InMemoryPersistence<String, Tag>(),
+            marker: Flag().marker,
+            legacy: { reads.increment(); return sampleRecords() }
+        )
+        _ = try migrating.load()
+
+        try migrating.update { _ in [] }
+        try migrating.update { _ in nil }
+
+        #expect(reads.value == 1)
+        #expect(try migrating.load().isEmpty)
+    }
+
+    @Test func anImportNeverOverwritesRecordsAnotherWriterSavedMeanwhile() throws {
+        let base = ScriptedPersistence<String, Tag>()
+        let counter = CleanUpCounter()
+        let flag = Flag()
+        let other = sampleRecords()[1]
+        let migrating = MigratingPersistence(
+            base: base,
+            marker: flag.marker,
+            legacy: {
+                // Another process saves between this process's read of the base and its import.
+                base.replaceStoredRecords([other])
+                return [sampleRecords()[0]]
+            },
+            cleanUp: { counter.increment() }
+        )
+
+        #expect(try migrating.load() == [other])
+        #expect(base.storedRecords == [other])
+        #expect(counter.value == 1)
+        #expect(flag.isSet)
+    }
+
     @Test func savesGoToTheBase() throws {
         let base = InMemoryPersistence<String, Tag>()
         let migrating = MigratingPersistence(base: base, marker: Flag().marker, legacy: { nil })
@@ -568,6 +1063,37 @@ struct MigratingPersistenceTests {
         MigrationMarker.userDefaults(key: key).markComplete()
 
         #expect(UserDefaults.standard.bool(forKey: key))
+    }
+}
+
+@Suite("Default update")
+struct DefaultUpdateTests {
+    /// A persistence that relies on the protocol's default `update(_:)`.
+    struct LoadAndSave: BookmarkPersistence {
+        let base = InMemoryPersistence<String, Tag>()
+
+        func load() throws(PersistenceError) -> [TestRecord] { try base.load() }
+        func save(_ records: [TestRecord]) throws(PersistenceError) { try base.save(records) }
+    }
+
+    @Test func savesWhatTheTransformReturns() throws {
+        let persistence = LoadAndSave()
+        try persistence.save([sampleRecords()[0]])
+
+        try persistence.update { $0 + [sampleRecords()[1]] }
+
+        #expect(persistence.base.storedRecords == sampleRecords())
+        #expect(persistence.base.saveCount == 2)
+    }
+
+    @Test func savesNothingWhenTheTransformReturnsNil() throws {
+        let persistence = LoadAndSave()
+        try persistence.save(sampleRecords())
+
+        try persistence.update { _ in nil }
+
+        #expect(persistence.base.storedRecords == sampleRecords())
+        #expect(persistence.base.saveCount == 1)
     }
 }
 

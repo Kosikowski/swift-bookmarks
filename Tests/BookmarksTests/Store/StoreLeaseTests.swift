@@ -591,4 +591,46 @@ struct StoreLeaseTests {
         #expect(harness.engine.isBalanced)
         #expect(harness.store.activeLease(for: "a") == nil)
     }
+
+    @Test func concurrentLeasesOfAStaleBookmarkRefreshOnce() async throws {
+        try await harness.add("a", "/Users/me/A")
+        harness.engine.moveItem(from: "/Users/me/A", to: "/Users/me/Renamed")
+        let calls = harness.engine.calls
+        let saves = harness.persistence.saveCount
+        let gate = harness.engine.holdResolution(of: "/Users/me/A")
+        let store = harness.store
+
+        let tasks = (0..<5).map { _ in Task { try await store.lease("a") } }
+        await gate.waitUntilReached()
+        while await store.pendingResolutionCallers(for: "a") < 5 {
+            await Task.yield()
+        }
+        gate.open()
+        var leases: [AccessLease] = []
+        for task in tasks {
+            leases.append(try await task.value)
+        }
+
+        #expect(harness.engine.calls.resolutions == calls.resolutions + 1)
+        #expect(harness.engine.calls.creations == calls.creations + 1)
+        #expect(harness.persistence.saveCount == saves + 1)
+        #expect(Set(leases.map(\.url)).count == 1)
+        leases.forEach { $0.end() }
+        #expect(harness.engine.isBalanced)
+    }
+
+    @Test func addingOverALeasedKeyDetachesItsLease() async throws {
+        try await harness.add("a", "/Users/me/A")
+        let lease = try await harness.store.lease("a")
+
+        try await harness.add("a", "/Users/me/B")
+
+        #expect(harness.store.activeLease(for: "a") == nil)
+        #expect(lease.isActive)
+        let fresh = try await harness.store.lease("a")
+        #expect(fresh.url.path(percentEncoded: false) == "/Users/me/B/")
+        lease.end()
+        fresh.end()
+        #expect(harness.engine.isBalanced)
+    }
 }

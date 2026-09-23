@@ -226,6 +226,31 @@ struct AccessRegistryTests {
             root.end()
         }
 
+        @Test func onlyCoversWithEnoughAccess() {
+            let readOnly = base.registry.lease(for: "ro", url: base.issue("/Users/me/ReadOnly"), access: .readOnly)
+            let reference = base.registry.lease(for: "ref", url: base.issue("/Users/me/Reference"), access: nil)
+
+            #expect(base.registry.lease(covering: URL(filePath: "/Users/me/ReadOnly/File")) == nil)
+            #expect(base.registry.lease(covering: URL(filePath: "/Users/me/ReadOnly/File"), access: .readOnly)?.url == readOnly.url)
+            #expect(base.registry.lease(covering: URL(filePath: "/Users/me/Reference/File"), access: .readOnly) == nil)
+            readOnly.end()
+            reference.end()
+            #expect(base.engine.isBalanced)
+        }
+
+        @Test func aDeeperScopeWithoutEnoughAccessFallsBackToAnAncestor() {
+            let outer = lease("outer", "/Users/me")
+            let inner = base.registry.lease(for: "inner", url: base.issue("/Users/me/Projects"), access: .readOnly)
+
+            let covering = base.registry.lease(covering: URL(filePath: "/Users/me/Projects/App"))
+
+            #expect(covering?.url == outer.url)
+            covering?.end()
+            outer.end()
+            inner.end()
+            #expect(base.engine.isBalanced)
+        }
+
         @Test func ignoresUnrelatedAndIdleItems() {
             lease("idle", "/Users/me/Idle").end()
             let other = lease("other", "/Users/me/Other")
@@ -253,6 +278,98 @@ struct AccessRegistryTests {
 
         #expect(engine.isBalanced)
         #expect(registry.activeKeys.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func activeLeasesNeverStartAScopeThatIsEnding() async {
+        let url = issue("/A")
+        let registry = registry
+        let rounds = 500
+
+        for _ in 0..<rounds {
+            let lease = registry.lease(for: "a", url: url)
+            async let ended: Void = lease.end()
+            async let joined = registry.activeLease(for: "a")
+            await ended
+            await joined?.end()
+        }
+
+        #expect(engine.calls.starts == rounds)
+        #expect(engine.isBalanced)
+        #expect(registry.activeKeys.isEmpty)
+    }
+
+    @Test func leasingAfterDirectAccessStartsItsOwnScope() async throws {
+        let engine = Fixtures.engine(Fixtures.iOS)
+        let registry = AccessRegistry<String>(engine: engine)
+        engine.addItem(at: "/Documents/Folder")
+        let service = Fixtures.service(engine)
+        let data = try await service.create(for: engine.grant("/Documents/Folder", origin: .documentPicker))
+        let resolved = try await service.resolve(data, policy: ResolutionPolicy(startsImplicitAccess: true))
+        let startsAfterResolution = engine.calls.starts
+
+        let direct = resolved.beginAccess()
+        let registered = registry.lease(for: "folder", resolved: resolved)
+
+        #expect(engine.calls.starts == startsAfterResolution + 1)
+        #expect(engine.outstandingAccess["/Documents/Folder"] == 2)
+        direct.end()
+        registered.end()
+        #expect(engine.isBalanced)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func endingEverythingWhileLeasesComeAndGoStaysBalanced() async {
+        let urls = (0..<6).map { issue("/Items/\($0)") }
+        let registry = registry
+
+        await withTaskGroup(of: Void.self) { group in
+            for index in 0..<300 {
+                group.addTask {
+                    if index.isMultiple(of: 25) {
+                        registry.endAll()
+                    } else {
+                        let lease = registry.lease(for: "\(index % 6)", url: urls[index % 6])
+                        await Task.yield()
+                        lease.end()
+                    }
+                }
+            }
+        }
+        registry.endAll()
+
+        #expect(engine.isBalanced)
+        #expect(engine.unbalancedStops.isEmpty)
+        #expect(registry.activeKeys.isEmpty)
+    }
+
+    @Test func leasingAgainAfterEndingEverythingStartsAgain() {
+        let url = issue("/A")
+        let first = lease("a", url)
+
+        registry.endAll()
+        let second = lease("a", url)
+
+        #expect(!first.isActive)
+        #expect(second.isActive)
+        #expect(engine.calls.starts == 2)
+        first.end()
+        second.end()
+        #expect(engine.isBalanced)
+    }
+
+    @Test func leasesOutliveTheirRegistry() {
+        let engine = Fixtures.engine()
+        engine.addItem(at: "/A")
+        let url = engine.grant("/A", origin: .fileImporter).url
+        var registry: AccessRegistry<String>? = AccessRegistry(engine: engine)
+        let lease = registry?.lease(for: "a", url: url)
+
+        registry = nil
+
+        #expect(lease?.isActive == true)
+        lease?.end()
+        #expect(engine.isBalanced)
     }
 }
 
@@ -337,5 +454,21 @@ struct ScopeLedgerTests {
         #expect(ledger.startedScopeCount == 0)
         #expect(ledger.lease(covering: URL(filePath: "/Users/me/Projects/App")) == nil)
         #expect(!folder.isActive)
+    }
+
+    @Test func coversWithTheDeepestScopeAcrossRegistries() throws {
+        let outer = AccessRegistry<String>(engine: engine, ledger: ledger)
+        let inner = AccessRegistry<Int>(engine: engine, ledger: ledger)
+        let home = lease("/Users/me", key: "home", in: outer)
+        let projects = lease("/Users/me/Projects", key: 1, in: inner)
+
+        let covering = try #require(ledger.lease(covering: URL(filePath: "/Users/me/Projects/App/File.swift")))
+        let outside = try #require(ledger.lease(covering: URL(filePath: "/Users/me/Notes")))
+
+        #expect(covering.url == projects.url)
+        #expect(outside.url == home.url)
+        #expect(engine.calls.starts == 2)
+        [covering, outside, home, projects].forEach { $0.end() }
+        #expect(engine.isBalanced)
     }
 }

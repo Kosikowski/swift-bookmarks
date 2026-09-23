@@ -31,9 +31,41 @@ struct GrantValidatorTests {
             #expect(base.refusal(.notTooBroad, base.info(path)) == .tooBroad(path: path))
         }
 
-        @Test(arguments: ["/Users/tester/Developer", "/Volumes/External", "/Volumes/External/Builds", "/opt/work"])
+        @Test(arguments: ["/Users/tester/Developer", "/Volumes/External", "/Volumes/External/Builds", "/opt/work", "/Library/Fonts", "/Applications/App.app"])
         func acceptsSpecificLocations(_ path: String) {
             #expect(base.refusal(.notTooBroad, base.info(path)) == nil)
+        }
+
+        @Test(arguments: ["/Volumes/Homes", "/Volumes/Homes/tester"])
+        func refusesAHomeOutsideUsersAndItsAncestors(_ path: String) {
+            let context = ValidationContext(homeDirectory: URL(filePath: "/Volumes/Homes/tester"))
+
+            #expect(NotTooBroadValidator().refusal(for: base.info(path), at: URL(filePath: path), in: context) == .tooBroad(path: path))
+            #expect(NotTooBroadValidator().refusal(for: base.info(path + "/Developer"), at: URL(filePath: path), in: context) == nil)
+        }
+
+        @Test(arguments: ["/users/someone", "/SYSTEM/Library", "/Private/var", "/system/volumes/data"])
+        func refusesSystemLocationsInAnyCaseWhereCaseIsIgnored(_ path: String) {
+            let insensitive = ItemInfo(isDirectory: true, isSymbolicLink: false, canonicalPath: path, namesAreCaseSensitive: false)
+
+            #expect(base.refusal(.notTooBroad, insensitive) == .tooBroad(path: path))
+        }
+
+        @Test func systemLocationsKeepTheirCaseWhereCaseMatters() {
+            #expect(base.refusal(.notTooBroad, base.info("/users/someone")) == nil)
+        }
+
+        @Test(arguments: [
+            "/System/Volumes/Data", "/System/Volumes/Data/Users", "/System/Volumes/Data/Users/someone",
+            "/System/Volumes/Data/private/var", "/System/Volumes/Data/Library",
+        ])
+        func refusesTheDataVolumeRootAndItsSystemLocations(_ path: String) {
+            #expect(base.refusal(.notTooBroad, base.info(path)) == .tooBroad(path: path))
+        }
+
+        @Test func acceptsSpecificLocationsOnTheDataVolume() {
+            #expect(base.refusal(.notTooBroad, base.info("/System/Volumes/Data/Users/tester/Developer")) == nil)
+            #expect(base.refusal(.notTooBroad, base.info("/System/Volumes/Data/opt/work")) == nil)
         }
 
         @Test func refusesAdditionalPaths() {

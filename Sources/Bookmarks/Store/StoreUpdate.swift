@@ -1,6 +1,7 @@
 /// A change to a store's records.
 public enum StoreChange<Key: Hashable & Sendable, Metadata: Sendable>: Sendable {
-    /// A record was added at the end of the order.
+    /// A record was added. It sits at the end of the order unless a ``reordered(_:)`` change
+    /// that follows it in the same batch says otherwise, as with most-recently-used ordering.
     case added(BookmarkRecord<Key, Metadata>)
     /// A record changed. Its position is unchanged.
     case updated(BookmarkRecord<Key, Metadata>)

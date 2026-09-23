@@ -20,10 +20,14 @@ public struct FailureHandling: Sendable {
 }
 
 /// What a store does when a newly added item is already stored under another key.
+///
+/// Re-granting a key with an item stored under another key fails with
+/// ``BookmarkStoreError/duplicate(of:)`` unless duplicates are allowed.
 public enum DuplicateHandling: Sendable, Hashable {
     /// Fail with ``BookmarkStoreError/duplicate(of:)``.
     case reject
-    /// Return the existing record unchanged.
+    /// Refresh the existing record with the new grant, keeping its key and metadata, and
+    /// return it. Re-picking an item whose bookmark stopped resolving restores it.
     case returnExisting
     /// Store the item again under the new key.
     case allow
@@ -45,7 +49,8 @@ public struct StorePolicy: Sendable {
     public var duplicates: DuplicateHandling
     /// The order of ``BookmarkStore/records()``.
     public var ordering: RecordOrdering
-    /// The maximum number of records. The last records in order are removed beyond it.
+    /// The maximum number of records. Beyond it, the least recent records are removed: the
+    /// oldest in insertion order, the least recently used in most-recently-used order.
     public var limit: Int?
     /// Checks run on items before they're added or re-granted.
     public var validators: [any GrantValidator]

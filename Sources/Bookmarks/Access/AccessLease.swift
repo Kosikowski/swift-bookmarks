@@ -54,9 +54,10 @@ public final class AccessLease: Sendable {
 
     /// Maps a URL inside the leased directory to one derived from ``url``, so it keeps the scope.
     ///
-    /// Returns `nil` when `descendant` isn't the leased item or inside it.
+    /// Returns `nil` when `descendant` isn't a file URL naming the leased item or an item
+    /// inside it.
     public func url(forDescendant descendant: URL) -> URL? {
-        guard let components = handle.path.relativeComponents(of: NormalizedPath(descendant)) else {
+        guard descendant.isFileURL, let components = handle.path.relativeComponents(of: NormalizedPath(descendant)) else {
             return nil
         }
         return components.reduce(url) { partial, component in

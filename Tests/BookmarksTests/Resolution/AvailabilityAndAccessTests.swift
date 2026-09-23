@@ -62,6 +62,20 @@ struct AvailabilityCheckTests {
         #expect(engine.calls.creations == before.creations)
     }
 
+    @Test func implicitChecksNeverStartAccess() async throws {
+        let engine = Fixtures.engine(Fixtures.iOS)
+        engine.addItem(at: "/Documents/Folder")
+        let service = Fixtures.service(engine)
+        let data = try await service.create(for: engine.grant("/Documents/Folder", origin: .documentPicker))
+        let starts = engine.calls.starts
+
+        #expect(await service.availability(of: data) == .available)
+
+        #expect(engine.calls.starts == starts)
+        #expect(engine.resolutionRequests.last?.options.contains(.withoutImplicitStartAccessing) == true)
+        #expect(engine.isBalanced)
+    }
+
     @Test func recordedValuesComeFromTheBytes() async throws {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
         engine.removeItem(at: "/Users/me/Folder")

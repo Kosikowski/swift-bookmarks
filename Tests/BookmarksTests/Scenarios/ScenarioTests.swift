@@ -25,6 +25,32 @@ struct DocumentBookmarksTests {
         #expect(engine.creationRequests.last?.document == "/Users/me/Report.pages")
     }
 
+    @Test func staleBookmarksRefreshAnchoredOnTheDocument() async throws {
+        let data = try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
+        engine.moveItem(from: "/Users/me/Images/chart.png", to: "/Users/me/Images/renamed.png")
+
+        let resolved = try await documents.resolve(data)
+
+        #expect(resolved.wasStale)
+        #expect(engine.creationRequests.last?.document == "/Users/me/Report.pages")
+        let refreshed = try #require(resolved.refreshedData)
+        #expect(try await documents.resolve(refreshed).displayPath == "/Users/me/Images/renamed.png")
+        #expect(engine.isBalanced)
+    }
+
+    @Test func aDocumentGrantCantBeUsedTwice() async throws {
+        let grant = engine.grant("/Users/me/Images/chart.png", origin: .openPanel)
+        _ = try await documents.create(for: grant)
+
+        let error = await #expect(throws: BookmarkError.self) { try await documents.create(for: grant) }
+
+        guard case .unsupported = error?.failure else {
+            Issue.record("Expected unsupported, got \(String(describing: error))")
+            return
+        }
+        #expect(engine.isBalanced)
+    }
+
     @Test func readOnlyAccess() async throws {
         let readOnly = Fixtures.service(engine).documents(anchoredOn: documents.document, access: .readOnly)
 
@@ -145,6 +171,41 @@ struct HandoffTests {
         #expect(engine.isBalanced)
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func aTimedOutReceiveStillBalancesTheImplicitStart() async throws {
+        let lease = try await activeLease()
+        let token = try await handoff.makeToken(for: lease)
+        lease.end()
+        let gate = engine.holdResolution(of: "/Users/me/Shared")
+        let handoff = Fixtures.service(engine, timeout: .milliseconds(30)).handoff
+
+        let error = await #expect(throws: BookmarkError.self) { try await handoff.receive(token) }
+        gate.open()
+
+        #expect(error?.failure == .timedOut)
+        while !engine.isBalanced {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(engine.isBalanced)
+    }
+
+    @Test func staleTokensRefreshWithoutASecondStart() async throws {
+        let lease = try await activeLease()
+        let token = try await handoff.makeToken(for: lease)
+        lease.end()
+        engine.moveItem(from: "/Users/me/Shared", to: "/Users/me/Moved")
+        let starts = engine.calls.starts
+
+        let received = try await handoff.receive(token)
+
+        // Resolution's implicit start is the only one: the refresh and the lease reuse it.
+        #expect(received.url.path(percentEncoded: false) == "/Users/me/Moved/")
+        #expect(engine.calls.starts == starts)
+        #expect(engine.outstandingAccess["/Users/me/Moved"] == 1)
+        received.end()
+        #expect(engine.isBalanced)
+    }
+
     @Test func refusesEndedLeases() async throws {
         let lease = try await activeLease()
         lease.end()
@@ -230,7 +291,7 @@ private struct RejectingAliasEngine: FileSystemEngine {
     func recordedValues(in data: BookmarkData) -> RecordedValues? { base.recordedValues(in: data) }
     func startAccessing(_ url: URL) -> Bool { base.startAccessing(url) }
     func stopAccessing(_ url: URL) { base.stopAccessing(url) }
-    func itemExists(atPath path: String) -> Bool { base.itemExists(atPath: path) }
+    func isVolumeMounted(atPath path: String) -> Bool { base.isVolumeMounted(atPath: path) }
     func fileIdentity(of url: URL) -> FileIdentity? { base.fileIdentity(of: url) }
     func itemInfo(at url: URL) -> ItemInfo? { base.itemInfo(at: url) }
     func namesAreCaseSensitive(at url: URL) -> Bool { base.namesAreCaseSensitive(at: url) }

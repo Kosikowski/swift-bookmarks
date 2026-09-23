@@ -62,4 +62,42 @@ struct NormalizedPathTests {
         #expect(!sensitive.contains(query))
         #expect(insensitive.matches(NormalizedPath("/USERS/me/projects")))
     }
+
+    @Test func firmlinksIgnoreCaseOnCaseInsensitiveVolumes() {
+        let insensitive = NormalizedPath("/var/folders/x", isCaseSensitive: false)
+        let sensitive = NormalizedPath("/var/folders/x")
+
+        #expect(insensitive.contains(NormalizedPath("/Private/VAR/folders/x/file")))
+        #expect(insensitive.relativeComponents(of: NormalizedPath("/PRIVATE/var/folders/x/file")) == ["file"])
+        #expect(!sensitive.contains(NormalizedPath("/Private/var/folders/x/file")))
+    }
+
+    @Test func relativeComponentsDropEitherSidesFirmlink() {
+        let long = NormalizedPath("/private/tmp/work")
+
+        #expect(long.relativeComponents(of: NormalizedPath("/tmp/work/a/b")) == ["a", "b"])
+        #expect(NormalizedPath("/tmp/work").relativeComponents(of: NormalizedPath("/private/tmp/work/a")) == ["a"])
+        #expect(long.relativeComponents(of: NormalizedPath("/private/tmp/work")) == [])
+    }
+
+    @Test func onlyTheFirmlinkedDirectoriesDropThePrivatePrefix() {
+        #expect(NormalizedPath("/private/var") == NormalizedPath("/var"))
+        #expect(NormalizedPath("/private/etc/hosts") == NormalizedPath("/etc/hosts"))
+        #expect(NormalizedPath("/private") != NormalizedPath("/"))
+        #expect(NormalizedPath("/private/Users") != NormalizedPath("/Users"))
+        #expect(NormalizedPath("/Users/private/var") != NormalizedPath("/Users/var"))
+    }
+
+    @Test func theRootContainsEverything() {
+        let root = NormalizedPath("/")
+
+        #expect(root.components.isEmpty)
+        #expect(root.relativeComponents(of: NormalizedPath("/a/b")) == ["a", "b"])
+        #expect(NormalizedPath("/..") == root)
+        #expect(NormalizedPath("/a/../..") == root)
+    }
+
+    @Test func dotsInsideNamesAreKept() {
+        #expect(NormalizedPath("/Users/me/.hidden/..x/a.b").components == ["Users", "me", ".hidden", "..x", "a.b"])
+    }
 }

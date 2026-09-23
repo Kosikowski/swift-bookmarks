@@ -60,10 +60,13 @@ public protocol GrantValidator: Sendable {
     func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal?
 }
 
-/// Refuses `/`, every top-level folder, other users' home folders, second-level system
-/// folders, and the user's home folder and its ancestors.
+/// Refuses `/`, every top-level folder, everything directly inside `/Users` (other users'
+/// home folders and `/Users/Shared`), `/private` and `/System`, and the user's home folder and
+/// its ancestors. The same locations under the data volume's root, `/System/Volumes/Data`,
+/// and the root itself are refused too.
 ///
-/// Volume roots such as `/Volumes/External` are accepted.
+/// Folders such as `/Library/Fonts`, `/Applications/App.app` and volume roots such as
+/// `/Volumes/External` are accepted. Add other locations with ``additionalPaths``.
 public struct NotTooBroadValidator: GrantValidator {
     /// Extra locations to refuse, in addition to the built-in rules.
     public var additionalPaths: Set<String>
@@ -83,13 +86,23 @@ public struct NotTooBroadValidator: GrantValidator {
     }
 
     private static func isSystemLocation(_ path: NormalizedPath) -> Bool {
-        switch path.components.count {
-        case 0, 1: true
-        case 2:
-            ["Users", "private", "System"].contains {
-                path.isCaseSensitive ? $0 == path.components[0] : $0.caseInsensitiveCompare(path.components[0]) == .orderedSame
-            }
-        default: false
+        isSystemLocation(path.components[...], isCaseSensitive: path.isCaseSensitive)
+    }
+
+    /// The data volume's root, `/System/Volumes/Data`, holds what `/` shows, so paths below it
+    /// follow the same rules.
+    private static func isSystemLocation(_ components: ArraySlice<String>, isCaseSensitive: Bool) -> Bool {
+        func same(_ lhs: String, _ rhs: String) -> Bool {
+            isCaseSensitive ? lhs == rhs : lhs.caseInsensitiveCompare(rhs) == .orderedSame
+        }
+        let dataVolume = ["System", "Volumes", "Data"]
+        if components.count >= dataVolume.count, zip(components, dataVolume).allSatisfy(same) {
+            return isSystemLocation(components.dropFirst(dataVolume.count), isCaseSensitive: isCaseSensitive)
+        }
+        switch components.count {
+        case 0, 1: return true
+        case 2: return ["Users", "private", "System"].contains { same($0, components[components.startIndex]) }
+        default: return false
         }
     }
 }
@@ -134,7 +147,9 @@ public struct NoOverlapValidator: GrantValidator {
     public func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal? {
         let candidate = NormalizedPath(item.canonicalPath, isCaseSensitive: item.namesAreCaseSensitive)
         for existingPath in context.existingPaths {
-            let existing = NormalizedPath(existingPath, isCaseSensitive: item.namesAreCaseSensitive)
+            // Stored paths can be links, since a bookmark records the path it was made from,
+            // while the candidate's path has its links resolved.
+            let existing = NormalizedPath(URL(filePath: existingPath).resolvingSymlinksInPath(), isCaseSensitive: item.namesAreCaseSensitive)
             if candidate.matches(existing) {
                 return .duplicate(path: item.canonicalPath)
             }

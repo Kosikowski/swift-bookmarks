@@ -17,8 +17,8 @@ public struct AliasFiles: Sendable {
     ///
     /// The grant is relinquished whether or not writing succeeds.
     public func write(aliasTo grant: Grant, at aliasURL: URL) async throws(BookmarkError) {
-        let data = try await service.consuming(grant) { () throws(BookmarkError) -> BookmarkData in
-            try await service.create(for: grant, kind: .alias)
+        let data = try await service.using(grant, consuming: true) { use throws(BookmarkError) -> BookmarkData in
+            try await service.createClaimed(using: use, kind: .alias, document: nil, keys: [], validation: nil)
         }
         let engine = service.engine
         let classifier = service.classifier

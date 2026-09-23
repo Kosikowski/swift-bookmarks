@@ -37,7 +37,8 @@ public struct MigrationMarker: Sendable {
 /// Imports records from a legacy source once, the first time the base persistence is empty.
 ///
 /// The legacy data is cleaned up only after the imported records were saved, so a failed
-/// import never loses the original. The marker keeps a store the user later empties from
+/// import never loses the original. When the base already holds records, the legacy data is
+/// superseded and cleaned up without being read. The marker keeps a store the user later empties from
 /// being filled again from legacy data.
 public struct MigratingPersistence<Base: BookmarkPersistence>: BookmarkPersistence {
     public typealias Key = Base.Key
@@ -54,7 +55,8 @@ public struct MigratingPersistence<Base: BookmarkPersistence>: BookmarkPersisten
     ///   - base: Where records live from now on.
     ///   - marker: Records that the migration ran. A failed legacy read leaves it unset.
     ///   - legacy: Reads records from the old location, or returns `nil` when there are none.
-    ///   - cleanUp: Removes the old data. Runs once, after the imported records are saved.
+    ///   - cleanUp: Removes the old data. Runs once, after the imported records are saved or
+    ///     when the base already holds records.
     public init(
         base: Base,
         marker: MigrationMarker,
@@ -70,14 +72,30 @@ public struct MigratingPersistence<Base: BookmarkPersistence>: BookmarkPersisten
     public func load() throws(PersistenceError) -> [BookmarkRecord<Key, Metadata>] {
         let current = try base.load()
         guard !marker.isComplete else { return current }
-        guard current.isEmpty, let imported = try legacy(), !imported.isEmpty else {
+        guard current.isEmpty else {
+            // The base already holds records, such as from an import whose clean-up didn't
+            // run, so the legacy data is superseded.
+            cleanUp()
             marker.markComplete()
             return current
         }
-        try base.save(imported)
+        guard let imported = try legacy(), !imported.isEmpty else {
+            marker.markComplete()
+            return current
+        }
+        // Another process sharing the base may have saved records since they were read; those
+        // supersede the import, the same as records found at the start.
+        var result = imported
+        try base.update { stored in
+            guard stored.isEmpty else {
+                result = stored
+                return nil
+            }
+            return imported
+        }
         cleanUp()
         marker.markComplete()
-        return imported
+        return result
     }
 
     public func save(_ records: [BookmarkRecord<Key, Metadata>]) throws(PersistenceError) {

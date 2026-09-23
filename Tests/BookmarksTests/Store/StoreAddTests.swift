@@ -149,7 +149,9 @@ struct StoreAddTests {
 
             let returned = try await harness.add("b", "/Users/me/A")
 
-            #expect(returned == original)
+            #expect(returned.key == original.key)
+            #expect(returned.metadata == original.metadata)
+            #expect(returned.createdAt == original.createdAt)
             #expect(try await harness.store.keys() == ["a"])
             #expect(harness.engine.isBalanced)
         }

@@ -230,4 +230,132 @@ struct StoreLoadingTests {
             #expect(await collect(changes, count: 1).isEmpty)
         }
     }
+
+    @Suite("Another process during resolution")
+    struct ExternalChangesDuringResolution {
+        /// Stores `a`, holds its resolution, and returns the store's pending lease.
+        func holdLease(
+            _ harness: StoreHarness
+        ) async throws -> (original: TestRecord, gate: FakeBookmarkEngine.Gate, lease: Task<AccessLease, any Error>) {
+            let original = try await harness.add("a", "/Users/me/A")
+            let gate = harness.engine.holdResolution(of: "/Users/me/A")
+            let store = harness.store
+            let lease = Task { try await store.lease("a") }
+            await gate.waitUntilReached()
+            return (original, gate, lease)
+        }
+
+        @Test func aResolutionNeverOverwritesAnotherProcessesRegrant() async throws {
+            let harness = StoreHarness()
+            let (original, gate, pending) = try await holdLease(harness)
+            harness.engine.moveItem(from: "/Users/me/A", to: "/Users/me/Moved")
+            var regranted = original
+            regranted.data = try await Fixtures.adoptFolder("/Users/me/B", engine: harness.engine)
+            regranted.lastKnownPath = "/Users/me/B"
+            harness.persistence.replaceStoredRecords([regranted])
+            try await harness.store.updateMetadata("a") { $0.name = "seen" }
+
+            gate.open()
+            let lease = try await pending.value
+
+            #expect(lease.url.path(percentEncoded: false) == "/Users/me/B/")
+            #expect(harness.saved.first?.data == regranted.data)
+            lease.end()
+            #expect(harness.engine.isBalanced)
+        }
+
+        @Test func aResolutionNeverRestoresARecordAnotherProcessRemoved() async throws {
+            let harness = StoreHarness()
+            let (_, gate, pending) = try await holdLease(harness)
+            harness.persistence.replaceStoredRecords([])
+            try await harness.store.reload()
+
+            gate.open()
+            let error = await #expect(throws: TestStore.Failure.self) { try await pending.value }
+
+            guard case .notFound("a") = error else {
+                Issue.record("Expected notFound, got \(String(describing: error))")
+                return
+            }
+            #expect(harness.saved.isEmpty)
+            #expect(try await harness.store.keys().isEmpty)
+            #expect(harness.engine.isBalanced)
+        }
+
+        @Test func aDroppedFailureNeverRemovesAnotherProcessesRegrant() async throws {
+            let harness = StoreHarness(policy: StorePolicy(failureHandling: .dropMissing))
+            let original = try await harness.add("a", "/Users/me/A")
+            harness.engine.removeItem(at: "/Users/me/A")
+            let gate = harness.engine.holdResolution(of: "/Users/me/A")
+            let store = harness.store
+            let pending = Task { try await store.lease("a") }
+            await gate.waitUntilReached()
+            var regranted = original
+            regranted.data = try await Fixtures.adoptFolder("/Users/me/B", engine: harness.engine)
+            regranted.lastKnownPath = "/Users/me/B"
+            harness.persistence.replaceStoredRecords([regranted])
+            try await store.reload()
+
+            gate.open()
+            let lease = try? await pending.value
+
+            #expect(harness.saved.map(\.data) == [regranted.data])
+            #expect(try await store.record("a")?.data == regranted.data)
+            lease?.end()
+            #expect(harness.engine.isBalanced)
+        }
+    }
+
+    @Suite("Following changes")
+    struct FollowingChanges {
+        @Test(.timeLimit(.minutes(1)))
+        func keepsFollowingAfterAFailedReload() async throws {
+            let harness = StoreHarness(records: [StoreLoadingTests.record("a")])
+            let store = harness.store
+            let updates = try await store.updates()
+            let (changes, continuation) = AsyncStream<Void>.makeStream()
+            let following = Task { await store.reload(on: changes) }
+            defer { following.cancel() }
+
+            harness.persistence.failLoads(1)
+            continuation.yield()
+            while harness.persistence.loadCount < 2 {
+                await Task.yield()
+            }
+            harness.persistence.replaceStoredRecords([StoreLoadingTests.record("a"), StoreLoadingTests.record("b")])
+            continuation.yield()
+
+            #expect(await collect(updates, count: 1) == ["added b"])
+            continuation.finish()
+            await following.value
+        }
+
+        @Test func endsWhenTheChangesEnd() async throws {
+            let harness = StoreHarness(records: [StoreLoadingTests.record("a")])
+            let (changes, continuation) = AsyncStream<Void>.makeStream()
+            continuation.finish()
+
+            await harness.store.reload(on: changes)
+
+            #expect(harness.persistence.loadCount == 0)
+        }
+    }
+
+    @Test func aLoadFailureSharedByManyCallersCanBeRetried() async throws {
+        let harness = StoreHarness(records: [Self.record("a")])
+        harness.persistence.failLoads(1)
+        let store = harness.store
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<20 {
+                group.addTask { try? await store.load() }
+            }
+        }
+        try await store.load()
+
+        #expect(try await store.keys() == ["a"])
+        let loads = harness.persistence.loadCount
+        _ = try await store.records()
+        #expect(harness.persistence.loadCount == loads)
+    }
 }

@@ -65,11 +65,36 @@ struct FakeBookmarkEngineTests {
             engine.unmountVolume(at: "/Volumes/Disk")
 
             #expect(!engine.containsItem(at: "/Volumes/Disk/Folder"))
-            #expect(!engine.itemExists(atPath: "/Volumes/Disk"))
+            #expect(!engine.isVolumeMounted(atPath: "/Volumes/Disk"))
             #expect(engine.fileIdentity(of: URL(filePath: "/Volumes/Disk/Folder")) == nil)
             engine.mountVolume(at: "/Volumes/Disk")
             #expect(engine.containsItem(at: "/Volumes/Disk/Folder"))
-            #expect(engine.itemExists(atPath: "/Volumes/Disk"))
+            #expect(engine.isVolumeMounted(atPath: "/Volumes/Disk"))
+        }
+
+        @Test func movesAcrossVolumesChangeIdentity() {
+            engine.mountVolume(at: "/Volumes/Backup")
+            engine.addItem(at: "/Users/me/F")
+            engine.addItem(at: "/Users/me/G")
+            let before = engine.fileIdentity(of: URL(filePath: "/Users/me/F"))
+            let sameVolume = engine.fileIdentity(of: URL(filePath: "/Users/me/G"))
+
+            engine.moveItem(from: "/Users/me/F", to: "/Volumes/Backup/F")
+            engine.moveItem(from: "/Users/me/G", to: "/Users/me/H")
+
+            #expect(engine.fileIdentity(of: URL(filePath: "/Volumes/Backup/F"))?.fileID != before?.fileID)
+            #expect(engine.fileIdentity(of: URL(filePath: "/Users/me/H")) == sameVolume)
+        }
+
+        @Test func bookmarksToItemsMovedToAnotherVolumeAreMissing() async throws {
+            engine.mountVolume(at: "/Volumes/Backup")
+            engine.addItem(at: "/Users/me/F")
+            let grant = engine.grant("/Users/me/F", origin: .openPanel)
+            let data = try engine.makeBookmark(for: grant.url, options: [.withSecurityScope], includingResourceValuesFor: [], relativeTo: nil)
+
+            engine.moveItem(from: "/Users/me/F", to: "/Volumes/Backup/F")
+
+            #expect(throws: CocoaError.self) { try engine.resolve(data, options: [], relativeTo: nil) }
         }
 
         @Test func symbolicLinksResolveToTheirTargets() {
@@ -77,7 +102,7 @@ struct FakeBookmarkEngineTests {
             engine.addSymbolicLink(at: "/link", pointingTo: "/real")
 
             #expect(engine.itemInfo(at: URL(filePath: "/link"))?.isSymbolicLink == true)
-            #expect(engine.itemInfo(at: URL(filePath: "/link"))?.isDirectory == true)
+            #expect(engine.itemInfo(at: URL(filePath: "/link"))?.isDirectory == false)
             #expect(engine.itemInfo(at: URL(filePath: "/link"))?.canonicalPath == "/real")
             #expect(engine.itemInfo(at: URL(filePath: "/nothing")) == nil)
         }

@@ -1,3 +1,5 @@
+import Foundation
+
 /// Any JSON value, kept verbatim so records this version can't read survive a rewrite.
 enum JSONValue: Codable, Sendable, Hashable {
     case null
@@ -28,6 +30,11 @@ enum JSONValue: Codable, Sendable, Hashable {
         } else {
             self = .object(try container.decode([String: JSONValue].self))
         }
+    }
+
+    /// The JSON that `encoder` writes for `value`.
+    init(encoding value: some Encodable, with encoder: JSONEncoder) throws {
+        self = try JSONDecoder().decode(JSONValue.self, from: encoder.encode(value))
     }
 
     func encode(to encoder: any Encoder) throws {

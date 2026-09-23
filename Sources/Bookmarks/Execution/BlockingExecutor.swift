@@ -5,8 +5,9 @@ import Synchronization
 ///
 /// Bookmark calls can block on volume mounts, network shares and system agents, and can't be
 /// cancelled. When a caller is cancelled or its timeout expires, it stops waiting. Work that
-/// has started finishes in the background with its result discarded; work still queued is
-/// skipped, so callers that gave up don't hold the executor's threads.
+/// has started finishes in the background with its result discarded, and no longer counts
+/// towards the executor's width, so calls that hang don't hold up the ones after them. Work
+/// still queued is skipped.
 public final class BlockingExecutor: Sendable {
     /// Thrown to the waiting caller when the timeout expires first.
     public struct TimeoutError: Error, Sendable, Equatable {
@@ -16,7 +17,14 @@ public final class BlockingExecutor: Sendable {
     /// A shared executor running up to four operations at a time.
     public static let shared = BlockingExecutor(label: "swift-bookmarks.blocking", width: 4)
 
+    /// The most threads an executor adds for abandoned work, so a volume that hangs every
+    /// call can't create threads without bound.
+    static let maxAbandoned = 32
+
+    /// How many operations run at a time, not counting abandoned ones.
+    public let width: Int
     private let queue: OperationQueue
+    private let abandoned = Mutex(0)
 
     /// Creates an executor that runs up to `width` operations at a time.
     public init(label: String, width: Int) {
@@ -26,6 +34,12 @@ public final class BlockingExecutor: Sendable {
         queue.maxConcurrentOperationCount = width
         queue.qualityOfService = .userInitiated
         self.queue = queue
+        self.width = width
+    }
+
+    /// The number of operations still running after their callers stopped waiting.
+    public var abandonedCount: Int {
+        abandoned.withLock { max($0, 0) }
     }
 
     /// Runs `work` and waits for its result, its timeout or the caller's cancellation.
@@ -34,23 +48,26 @@ public final class BlockingExecutor: Sendable {
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         try Task.checkCancellation()
-        let resumer = OneShot<T>()
+        let call = Call<T>()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                resumer.install(continuation)
-                queue.addOperation {
-                    guard !resumer.isSettled else { return }
-                    resumer.resume(with: Result { try work() })
+                call.install(continuation)
+                queue.addOperation { [self] in
+                    guard call.begin() else { return }
+                    if call.finish(with: Result { try work() }) {
+                        adjustAbandoned(by: -1)
+                    }
                 }
-                if let timeout {
-                    let deadline = DispatchTime.now() + timeout.dispatchInterval
-                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: deadline) {
-                        resumer.resume(with: .failure(TimeoutError(timeout: timeout)))
+                if let timeout, case let interval = timeout.dispatchInterval, interval != .never {
+                    // Weak, so a pending timer doesn't keep a finished call or the executor alive.
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + interval) { [weak self, weak call] in
+                        guard let self, let call else { return }
+                        giveUp(call, with: TimeoutError(timeout: timeout))
                     }
                 }
             }
-        } onCancel: {
-            resumer.resume(with: .failure(CancellationError()))
+        } onCancel: { [self] in
+            giveUp(call, with: CancellationError())
         }
     }
 
@@ -63,66 +80,95 @@ public final class BlockingExecutor: Sendable {
         }
         return try result.get()
     }
-}
 
-private final class OneShot<T: Sendable>: Sendable {
-    private enum State {
-        case idle
-        case waiting(CheckedContinuation<T, any Error>)
-        case pending(Result<T, any Error>)
-        case finished
-    }
-
-    private let state = Mutex<State>(.idle)
-
-    /// Whether the waiter already has its answer, such as a timeout, so the work is moot.
-    var isSettled: Bool {
-        state.withLock { state in
-            switch state {
-            case .idle, .waiting: false
-            case .pending, .finished: true
-            }
+    private func giveUp<T>(_ call: Call<T>, with error: any Error) {
+        if call.abandon(with: error) {
+            adjustAbandoned(by: 1)
         }
     }
 
+    private func adjustAbandoned(by delta: Int) {
+        abandoned.withLock { count in
+            // An operation can finish between its caller giving up and the increment, so the
+            // count may dip below zero for a moment.
+            count += delta
+            queue.maxConcurrentOperationCount = width + min(max(count, 0), Self.maxAbandoned)
+        }
+    }
+}
+
+/// One caller waiting for one operation.
+private final class Call<T: Sendable>: Sendable {
+    private struct State {
+        var continuation: CheckedContinuation<T, any Error>?
+        var early: Result<T, any Error>?
+        var isSettled = false
+        var isRunning = false
+    }
+
+    private let state = Mutex(State())
+
     func install(_ continuation: CheckedContinuation<T, any Error>) {
         let early: Result<T, any Error>? = state.withLock { state in
-            switch state {
-            case .idle:
-                state = .waiting(continuation)
+            precondition(state.continuation == nil, "Continuation installed twice")
+            guard state.isSettled else {
+                state.continuation = continuation
                 return nil
-            case .pending(let result):
-                state = .finished
-                return result
-            case .waiting, .finished:
-                preconditionFailure("Continuation installed twice")
             }
+            return state.early.take()
         }
         if let early {
             continuation.resume(with: early)
         }
     }
 
-    func resume(with result: Result<T, any Error>) {
-        let continuation: CheckedContinuation<T, any Error>? = state.withLock { state in
-            switch state {
-            case .idle:
-                state = .pending(result)
-                return nil
-            case .waiting(let continuation):
-                state = .finished
-                return continuation
-            case .pending, .finished:
-                return nil
-            }
+    /// Marks the work started. Returns `false` when the caller already stopped waiting.
+    func begin() -> Bool {
+        state.withLock { state in
+            guard !state.isSettled else { return false }
+            state.isRunning = true
+            return true
+        }
+    }
+
+    /// Delivers the work's result. Returns whether the caller had stopped waiting while the
+    /// work ran, so the work was abandoned.
+    func finish(with result: Result<T, any Error>) -> Bool {
+        let (continuation, wasAbandoned) = state.withLock { state -> (CheckedContinuation<T, any Error>?, Bool) in
+            state.isRunning = false
+            guard !state.isSettled else { return (nil, true) }
+            return (settle(&state, with: result), false)
         }
         continuation?.resume(with: result)
+        return wasAbandoned
+    }
+
+    /// Stops the caller waiting with `error`. Returns whether this abandons running work.
+    func abandon(with error: any Error) -> Bool {
+        let result = Result<T, any Error>.failure(error)
+        let (continuation, abandonsWork) = state.withLock { state -> (CheckedContinuation<T, any Error>?, Bool) in
+            guard !state.isSettled else { return (nil, false) }
+            return (settle(&state, with: result), state.isRunning)
+        }
+        continuation?.resume(with: result)
+        return abandonsWork
+    }
+
+    private func settle(_ state: inout State, with result: Result<T, any Error>) -> CheckedContinuation<T, any Error>? {
+        state.isSettled = true
+        guard let continuation = state.continuation.take() else {
+            state.early = result
+            return nil
+        }
+        return continuation
     }
 }
 
 extension Duration {
+    /// The duration as a dispatch interval, `.never` when it's too long to represent.
     var dispatchInterval: DispatchTimeInterval {
         let (seconds, attoseconds) = components
+        guard seconds < Int64.max / 1_000_000_000 else { return .never }
         let nanoseconds = seconds * 1_000_000_000 + attoseconds / 1_000_000_000
         return .nanoseconds(Int(clamping: max(nanoseconds, 0)))
     }

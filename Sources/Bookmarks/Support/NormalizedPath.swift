@@ -44,7 +44,7 @@ struct NormalizedPath: Equatable, Sendable, CustomStringConvertible {
     func relativeComponents(of descendant: NormalizedPath) -> [String]? {
         guard contains(descendant) else { return nil }
         let depth = keys(caseSensitive: isCaseSensitive).count
-        return Array(descendant.components.dropFirst(descendant.firmlinkPrefixLength + depth))
+        return Array(descendant.components.dropFirst(descendant.firmlinkPrefixLength(caseSensitive: isCaseSensitive) + depth))
     }
 
     static func == (lhs: NormalizedPath, rhs: NormalizedPath) -> Bool {
@@ -53,12 +53,15 @@ struct NormalizedPath: Equatable, Sendable, CustomStringConvertible {
 
     private static let firmlinkedDirectories: Set<String> = ["var", "tmp", "etc"]
 
-    private var firmlinkPrefixLength: Int {
-        components.count >= 2 && components[0] == "private" && Self.firmlinkedDirectories.contains(components[1]) ? 1 : 0
+    private func firmlinkPrefixLength(caseSensitive: Bool) -> Int {
+        guard components.count >= 2 else { return 0 }
+        let first = caseSensitive ? components[0] : components[0].lowercased()
+        let second = caseSensitive ? components[1] : components[1].lowercased()
+        return first == "private" && Self.firmlinkedDirectories.contains(second) ? 1 : 0
     }
 
     private func keys(caseSensitive: Bool) -> [String] {
-        components.dropFirst(firmlinkPrefixLength).map { component in
+        components.dropFirst(firmlinkPrefixLength(caseSensitive: caseSensitive)).map { component in
             let composed = component.precomposedStringWithCanonicalMapping
             return caseSensitive ? composed : composed.folding(options: .caseInsensitive, locale: nil)
         }

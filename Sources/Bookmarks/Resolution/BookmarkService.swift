@@ -13,6 +13,10 @@ public struct BookmarkService: Sendable {
     public let executor: BlockingExecutor
     /// How long to wait for a single system call. `nil` waits indefinitely.
     public var timeout: Duration?
+
+    /// The default ``timeout``: long enough for a slow volume, short enough that a hung one
+    /// fails instead of waiting forever.
+    public static let defaultTimeout: Duration = .seconds(30)
     /// Where the scopes of resolved bookmarks and of stores using this service are counted.
     public let ledger: ScopeLedger
 
@@ -20,7 +24,7 @@ public struct BookmarkService: Sendable {
     public init(
         engine: any FileSystemEngine = SystemBookmarkEngine(),
         executor: BlockingExecutor = .shared,
-        timeout: Duration? = nil,
+        timeout: Duration? = BookmarkService.defaultTimeout,
         ledger: ScopeLedger = .shared
     ) {
         self.engine = engine
@@ -89,9 +93,7 @@ public struct BookmarkService: Sendable {
     /// Does nothing for origins whose access the system didn't start, and for grants already
     /// adopted or relinquished.
     public func relinquish(_ grant: Grant) {
-        if grant.claim(), grant.isStartedBySystem(on: environment.platform) {
-            engine.stopAccessing(grant.url)
-        }
+        grant.relinquish()
     }
 
     /// Balances the access the system started for grants that won't be adopted, such as the
@@ -182,7 +184,7 @@ extension BookmarkService {
 
     var classifier: FailureClassifier {
         let engine = engine
-        return FailureClassifier { engine.itemExists(atPath: $0) }
+        return FailureClassifier { engine.isVolumeMounted(atPath: $0) }
     }
 
     func create(
@@ -193,7 +195,21 @@ extension BookmarkService {
         validation: Validation?
     ) async throws(BookmarkError) -> BookmarkData {
         try checkSupported(kind, document: document)
-        return try await createNow(grant, kind: kind, document: document, keys: keys, validation: validation).data
+        return try await using(grant, consuming: false) { use throws(BookmarkError) in
+            try await createNow(use, kind: kind, document: document, keys: keys, validation: validation).data
+        }
+    }
+
+    /// Creates a bookmark under a claim that ``using(_:consuming:_:)`` made.
+    func createClaimed(
+        using use: GrantUse,
+        kind: BookmarkKind,
+        document: URL?,
+        keys: Set<URLResourceKey>,
+        validation: Validation?
+    ) async throws(BookmarkError) -> BookmarkData {
+        try checkSupported(kind, document: document)
+        return try await createNow(use, kind: kind, document: document, keys: keys, validation: validation).data
     }
 
     func adopt(
@@ -203,17 +219,19 @@ extension BookmarkService {
         keys: Set<URLResourceKey>,
         validation: Validation?
     ) async throws(BookmarkError) -> ResolvedBookmark {
-        let created = try await consuming(grant) { () throws(BookmarkError) -> Created in
+        let created = try await using(grant, consuming: true) { use throws(BookmarkError) -> Created in
             try checkSupported(kind, document: document)
-            return try await createNow(grant, kind: kind, document: document, keys: keys, validation: validation)
+            return try await createNow(use, kind: kind, document: document, keys: keys, validation: validation)
         }
         let resolved = try await resolve(created.data, kind: kind, document: document, policy: .default)
+        // Bytes can be stale as soon as they're created, such as when the item moves in
+        // between, so the resolution's refresh is kept.
         return ResolvedBookmark(
             kind: kind,
             originalData: created.data,
-            wasStale: false,
-            refreshedData: nil,
-            refreshError: nil,
+            wasStale: resolved.wasStale,
+            refreshedData: resolved.refreshedData,
+            refreshError: resolved.refreshError,
             recorded: resolved.recorded,
             fileIdentity: created.identity,
             handle: resolved.handle
@@ -275,9 +293,24 @@ extension BookmarkService {
         return try await body(lease.url)
     }
 
-    func consuming<T>(_ grant: Grant, _ body: () async throws(BookmarkError) -> T) async throws(BookmarkError) -> T {
-        defer { relinquish(grant) }
-        return try await body()
+    /// Runs `body` with a claim on the grant, so no other creation uses it meanwhile.
+    ///
+    /// The claim ends when the creation work that `body` hands it to finishes, even when this
+    /// caller stops waiting first, so the system's start stays balanced for the whole
+    /// creation. With `consuming`, ending the claim relinquishes the grant, whether or not
+    /// creation succeeds.
+    func using<T>(
+        _ grant: Grant,
+        consuming: Bool,
+        _ body: (GrantUse) async throws(BookmarkError) -> T
+    ) async throws(BookmarkError) -> T {
+        guard let use = GrantUse(claiming: grant, consuming: consuming) else { throw Self.grantUnavailable }
+        defer { use.endUnlessHandedOff() }
+        return try await body(use)
+    }
+
+    static var grantUnavailable: BookmarkError {
+        BookmarkError(.unsupported(reason: "The grant was already adopted or relinquished, or is being adopted."))
     }
 
     func checkSupported(_ kind: BookmarkKind, document: URL?) throws(BookmarkError) {
@@ -302,20 +335,19 @@ extension BookmarkService {
     }
 
     private func createNow(
-        _ grant: Grant,
+        _ use: GrantUse,
         kind: BookmarkKind,
         document: URL?,
         keys: Set<URLResourceKey>,
         validation: Validation?
     ) async throws(BookmarkError) -> Created {
-        guard !grant.isConsumed else {
-            throw BookmarkError(.unsupported(reason: "The grant was already adopted or relinquished."))
-        }
         let engine = engine
         let classifier = classifier
-        let platform = environment.platform
+        let grant = use.grant
+        use.handOff()
         return try await run { () throws(BookmarkError) -> Created in
-            let needsStart = !grant.isStartedBySystem(on: platform) && grant.origin != .alreadyAccessible
+            defer { use.end() }
+            let needsStart = !grant.isStartedBySystem && grant.origin != .alreadyAccessible
             let started = needsStart && engine.startAccessing(grant.url)
             defer {
                 if started {

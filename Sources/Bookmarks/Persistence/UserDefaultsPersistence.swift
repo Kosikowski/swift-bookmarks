@@ -4,7 +4,8 @@ import os
 /// Stores records as JSON under one `UserDefaults` key.
 ///
 /// Suitable for a handful of bookmarks written by one process. Undecodable data is moved to
-/// `<key>.corrupted` when ``CorruptionHandling/quarantine`` applies; records this version
+/// `<key>.corrupted`, replacing any earlier undecodable value, when
+/// ``CorruptionHandling/quarantine`` applies; records this version
 /// can't decode are kept unchanged. `UserDefaults` offers no way to read and write as one
 /// step, so use ``JSONFilePersistence`` for records that several processes change.
 public struct UserDefaultsPersistence<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: BookmarkPersistence {
@@ -39,7 +40,7 @@ public struct UserDefaultsPersistence<Key: Hashable & Sendable & Codable, Metada
         let defaults = try defaults()
         let stored = try stored(in: defaults)
         guard let records = transform(stored.records) else { return }
-        let data = try PersistedEnvelope<Key, Metadata>.encode(records, preserving: stored.preserved, pretty: false)
+        let data = try PersistedEnvelope<Key, Metadata>.encode(records, over: stored, pretty: false)
         defaults.set(data, forKey: key)
     }
 
