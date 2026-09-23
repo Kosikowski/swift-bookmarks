@@ -371,9 +371,7 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     }
 
     private func resolve(_ snapshot: Table.Snapshot) async throws(Failure) -> ResolvedBookmark {
-        var resolution = policy.resolution
-        resolution.startsImplicitAccess = false
-        let policy = resolution
+        let policy = ResolutionPolicy(mounting: policy.mounting, allowsUI: policy.allowsUI)
         let service = service
         let record = snapshot.record
         do {

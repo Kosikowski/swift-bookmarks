@@ -49,8 +49,10 @@ public struct StorePolicy: Sendable {
     public var limit: Int?
     /// Checks run on items before they're added or re-granted.
     public var validators: [any GrantValidator]
-    /// How records are resolved when leased.
-    public var resolution: ResolutionPolicy
+    /// Whether resolving a record may mount the volume that holds it.
+    public var mounting: ResolutionPolicy.Mounting
+    /// Whether resolving a record may show UI, such as a network credentials prompt.
+    public var allowsUI: Bool
     /// Whether a re-grant must pick the same item, by file identity, as the original.
     public var requiresSameItemOnRegrant: Bool
 
@@ -61,7 +63,8 @@ public struct StorePolicy: Sendable {
         ordering: RecordOrdering = .insertion,
         limit: Int? = nil,
         validators: [any GrantValidator] = [],
-        resolution: ResolutionPolicy = .default,
+        mounting: ResolutionPolicy.Mounting = .never,
+        allowsUI: Bool = false,
         requiresSameItemOnRegrant: Bool = false
     ) {
         precondition(limit.map { $0 > 0 } ?? true, "A store limit must be positive")
@@ -70,7 +73,8 @@ public struct StorePolicy: Sendable {
         self.ordering = ordering
         self.limit = limit
         self.validators = validators
-        self.resolution = resolution
+        self.mounting = mounting
+        self.allowsUI = allowsUI
         self.requiresSameItemOnRegrant = requiresSameItemOnRegrant
     }
 

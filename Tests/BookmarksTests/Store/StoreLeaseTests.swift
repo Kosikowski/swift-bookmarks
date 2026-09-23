@@ -408,6 +408,33 @@ struct StoreLeaseTests {
         }
     }
 
+    @Test func resolvesWithTheStoresMountingAndUIOptions() async throws {
+        let harness = StoreHarness(policy: StorePolicy(mounting: .allowed, allowsUI: true))
+        harness.engine.mountVolume(at: "/Volumes/Backup")
+        try await harness.add("a", "/Volumes/Backup/Builds")
+        harness.engine.unmountVolume(at: "/Volumes/Backup")
+
+        let lease = try await harness.store.lease("a")
+
+        let options = try #require(harness.engine.resolutionRequests.last?.options)
+        #expect(!options.contains(.withoutMounting))
+        #expect(!options.contains(.withoutUI))
+        #expect(options.contains(.withSecurityScope))
+        #expect(harness.engine.containsItem(at: "/Volumes/Backup/Builds"))
+        lease.end()
+    }
+
+    @Test func neverMountsOrShowsUIByDefault() async throws {
+        let harness = StoreHarness()
+        try await harness.add("a", "/Users/me/A")
+
+        try await harness.store.lease("a").end()
+
+        let options = try #require(harness.engine.resolutionRequests.last?.options)
+        #expect(options.contains(.withoutMounting))
+        #expect(options.contains(.withoutUI))
+    }
+
     @Test func recentsMoveToTheFrontWhenAnActiveLeaseIsShared() async throws {
         let harness = StoreHarness(policy: .recents(limit: 5))
         try await harness.add("a", "/A")
