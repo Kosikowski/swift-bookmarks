@@ -79,17 +79,66 @@ struct BlockingExecutorTests {
         release.signal()
     }
 
-    @Test func alreadyCancelledCallersDontWait() async {
+    @Test func alreadyCancelledCallersSkipTheWork() async throws {
         let executor = BlockingExecutor(label: "test", width: 1)
-        let release = DispatchSemaphore(value: 0)
+        let ran = Atomic(false)
 
         let task = Task {
             withUnsafeCurrentTask { $0?.cancel() }
-            return try await executor.run { release.wait() }
+            return try await executor.run { ran.store(true, ordering: .relaxed) }
         }
 
         await #expect(throws: CancellationError.self) { try await task.value }
+        try await executor.run {}
+        let didRun = ran.load(ordering: .relaxed)
+        #expect(!didRun)
+    }
+
+    @Test func queuedCallersTimeOutWhileHungWorkHoldsTheQueue() async throws {
+        let executor = BlockingExecutor(label: "test", width: 1)
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let hung = Task {
+            try await executor.run {
+                started.signal()
+                release.wait()
+            }
+        }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                started.wait()
+                continuation.resume()
+            }
+        }
+
+        await #expect(throws: BlockingExecutor.TimeoutError.self) {
+            try await executor.run(timeout: .milliseconds(20)) { 1 }
+        }
+
         release.signal()
+        try await hung.value
+    }
+
+    @Test func performFinishesWorkForCancelledCallers() async throws {
+        let executor = BlockingExecutor(label: "test", width: 1)
+        let finished = Atomic(false)
+
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await executor.perform { () -> Void in finished.store(true, ordering: .relaxed) }
+        }
+        await task.value
+
+        let didFinish = finished.load(ordering: .relaxed)
+        #expect(didFinish)
+    }
+
+    @Test func performPropagatesTypedErrors() async {
+        let executor = BlockingExecutor(label: "test", width: 1)
+
+        await #expect(throws: Failure.self) {
+            try await executor.perform { () throws(Failure) -> Int in throw Failure() }
+        }
     }
 
     @Test func limitsConcurrencyToItsWidth() async throws {

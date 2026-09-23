@@ -69,7 +69,8 @@ struct StoreFailurePathTests {
 
 @Suite("Persistence read failures")
 struct PersistenceReadFailureTests {
-    @Test func unreadableFilesReportReadFailures() throws {
+    @Test(.disabled(if: getuid() == 0, "File permissions don't restrict root"))
+    func unreadableFilesReportReadFailures() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "swift-bookmarks-unreadable-\(UUID().uuidString)")
         defer {
             try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path(percentEncoded: false))

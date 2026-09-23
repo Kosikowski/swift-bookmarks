@@ -55,7 +55,9 @@ struct StoreLeaseTests {
 
         let tasks = (0..<5).map { _ in Task { try await store.lease("a") } }
         await gate.waitUntilReached()
-        try await Task.sleep(for: .milliseconds(20))
+        while store.pendingResolutionCallers(for: "a") < 5 {
+            await Task.yield()
+        }
         gate.open()
         var leases: [AccessLease] = []
         for task in tasks {
@@ -305,6 +307,51 @@ struct StoreLeaseTests {
             lease.end()
             #expect(harness.engine.isBalanced)
         }
+
+        @Test func aLateCallerNeverJoinsAResolutionOfReplacedBytes() async throws {
+            let harness = StoreHarness()
+            try await harness.add("a", "/Users/me/A")
+            let gate = harness.engine.holdResolution(of: "/Users/me/A")
+            let store = harness.store
+
+            let early = Task { try await store.lease("a") }
+            await gate.waitUntilReached()
+            try await store.regrant("a", with: harness.grant("/Users/me/New"))
+            let lateLease = try await store.lease("a")
+            gate.open()
+            let earlyLease = try await early.value
+            #expect(lateLease.url.path(percentEncoded: false) == "/Users/me/New/")
+            #expect(earlyLease.url == lateLease.url)
+            #expect(try await store.record("a")?.lastKnownPath == "/Users/me/New")
+            earlyLease.end()
+            lateLease.end()
+            #expect(harness.engine.isBalanced)
+        }
+
+        @Test func givesUpWhenTheRecordKeepsChanging() async throws {
+            let harness = StoreHarness()
+            let store = harness.store
+            try await harness.add("a", "/Users/me/0")
+            var gate = harness.engine.holdResolution(of: "/Users/me/0")
+
+            let task = Task { try await store.lease("a") }
+            for next in 1...3 {
+                await gate.waitUntilReached()
+                try await store.regrant("a", with: harness.grant("/Users/me/\(next)"))
+                let current = gate
+                if next < 3 {
+                    gate = harness.engine.holdResolution(of: "/Users/me/\(next)")
+                }
+                current.open()
+            }
+
+            let error = await #expect(throws: TestStore.Failure.self) { try await task.value }
+            guard case .changedDuringAccess("a") = error else {
+                Issue.record("Expected changedDuringAccess, got \(String(describing: error))")
+                return
+            }
+            #expect(harness.engine.isBalanced)
+        }
     }
 
     @Suite("withAccess")
@@ -358,6 +405,62 @@ struct StoreLeaseTests {
             let name = try await harness.store.withAccess(to: "a") { $0.lastPathComponent }
 
             #expect(name == "A")
+        }
+    }
+
+    @Test func recentsMoveToTheFrontWhenAnActiveLeaseIsShared() async throws {
+        let harness = StoreHarness(policy: .recents(limit: 5))
+        try await harness.add("a", "/A")
+        let held = try await harness.store.lease("a")
+        try await harness.add("b", "/B")
+
+        let shared = try await harness.store.lease("a")
+
+        #expect(try await harness.store.keys() == ["a", "b"])
+        held.end()
+        shared.end()
+    }
+
+    @Test func leasesUnsandboxedReferenceBookmarks() async throws {
+        let harness = StoreHarness(environment: Fixtures.unsandboxedMac)
+        try await harness.add("a", "/Users/me/A")
+
+        let lease = try await harness.store.lease("a")
+
+        #expect(try await harness.store.record("a")?.kind == .reference)
+        #expect(lease.url.path(percentEncoded: false) == "/Users/me/A/")
+        lease.end()
+        #expect(harness.engine.isBalanced)
+    }
+
+    @Suite("Covering leases")
+    struct Covering {
+        @Test func fallsBackToAShallowerItemWhenTheDeepestFails() async throws {
+            let harness = StoreHarness(policy: StorePolicy(validators: []))
+            try await harness.add("home", "/Users/me")
+            try await harness.add("projects", "/Users/me/Projects")
+            harness.engine.failResolution(of: "/Users/me/Projects", with: FakeErrors.corrupt)
+
+            let lease = try #require(try await harness.store.lease(covering: URL(filePath: "/Users/me/Projects/App")))
+
+            #expect(lease.url.path(percentEncoded: false) == "/Users/me/")
+            #expect(try await harness.store.record("projects")?.status.failure == .needsRegrant)
+            lease.end()
+            #expect(harness.engine.isBalanced)
+        }
+
+        @Test func throwsTheDeepestFailureWhenNothingResolves() async throws {
+            let harness = StoreHarness(policy: StorePolicy(validators: []))
+            try await harness.add("home", "/Users/me")
+            try await harness.add("projects", "/Users/me/Projects")
+            harness.engine.failResolution(of: "/Users/me", with: FakeErrors.denied)
+            harness.engine.removeItem(at: "/Users/me/Projects")
+
+            let error = await #expect(throws: TestStore.Failure.self) {
+                try await harness.store.lease(covering: URL(filePath: "/Users/me/Projects/App"))
+            }
+
+            #expect(error?.bookmarkFailure == .missing)
         }
     }
 

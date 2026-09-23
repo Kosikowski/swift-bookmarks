@@ -1,6 +1,6 @@
 import Bookmarks
 import BookmarksTesting
-import BookmarksUI
+@testable import BookmarksUI
 import Foundation
 import Testing
 import UniformTypeIdentifiers
@@ -94,6 +94,21 @@ struct GrantMappingTests {
 
     @Test func importerFailuresPassThrough() {
         #expect(throws: Failure.self) { try GrantMapping.grants(from: .failure(Failure())).get() }
+    }
+}
+
+@Suite("PickerContinuation")
+struct PickerContinuationTests {
+    @Test func resumesOnceWithTheFirstResult() async {
+        let picked = URL(filePath: "/picked")
+
+        let urls = await withCheckedContinuation { continuation in
+            let result = PickerContinuation(continuation)
+            result.resume(returning: [picked])
+            result.resume(returning: [])
+        }
+
+        #expect(urls == [picked])
     }
 }
 

@@ -134,6 +134,27 @@ struct StoreMutationTests {
             #expect(record.lastKnownPath == "/Users/me/Moved")
         }
 
+        @Test func forgettingDuringARegrantWins() async throws {
+            let harness = StoreHarness()
+            try await harness.add("a", "/Users/me/A")
+            let grant = harness.grant("/Users/me/B")
+            let gate = harness.engine.holdResolution(of: "/Users/me/B")
+            let store = harness.store
+
+            let regrant = Task { try await store.regrant("a", with: grant) }
+            await gate.waitUntilReached()
+            try await store.forget("a")
+            gate.open()
+
+            let error = await #expect(throws: TestStore.Failure.self) { try await regrant.value }
+            guard case .notFound("a") = error else {
+                Issue.record("Expected notFound, got \(String(describing: error))")
+                return
+            }
+            #expect(try await store.records().isEmpty)
+            #expect(harness.engine.isBalanced)
+        }
+
         @Test func validatorsIgnoreTheRecordBeingRegranted() async throws {
             let harness = StoreHarness(policy: StorePolicy(validators: [.noOverlap]))
             try await harness.add("a", "/Users/me/A")
@@ -223,7 +244,23 @@ struct StoreMutationTests {
             let again = try await harness.add("other", "/A")
 
             #expect(again.key == first.key)
-            #expect(try await harness.store.keys().count == 2)
+            #expect(try await harness.store.keys() == ["a", "b"])
+        }
+
+        @Test func evictedItemsKeepTheirActiveLeases() async throws {
+            for name in ["a", "b", "c"] {
+                try await harness.add(name, "/\(name)")
+            }
+            let lease = try await harness.store.lease("a")
+            for name in ["x", "y", "z"] {
+                try await harness.add(name, "/\(name)")
+            }
+
+            #expect(try await !harness.store.contains("a"))
+            #expect(lease.isActive)
+            #expect(harness.store.activeLease(for: "a") == nil)
+            lease.end()
+            #expect(harness.engine.isBalanced)
         }
 
         @Test func keepsUnavailableItems() async throws {

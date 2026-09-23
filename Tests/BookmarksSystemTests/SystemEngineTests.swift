@@ -234,6 +234,8 @@ struct SystemEngineTests {
             #expect(linkInfo.isSymbolicLink)
             #expect(linkInfo.canonicalPath == sandbox.canonical(folder))
             #expect(engine.itemInfo(at: sandbox.url("Nothing")) == nil)
+            #expect(engine.fileIdentity(of: sandbox.url("Nothing")) == nil)
+            #expect(engine.recordedValues(in: BookmarkData(Data("garbage".utf8))) == nil)
         }
 
         @Test func reportsWhetherItemsExist() throws {

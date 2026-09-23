@@ -93,6 +93,14 @@ struct DocumentBookmarksTests {
         }
     }
 
+    @Test func checksAvailabilityAgainstTheDocument() async throws {
+        let data = try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
+
+        #expect(await documents.availability(of: data) == .available)
+        engine.removeItem(at: "/Users/me/Images/chart.png")
+        #expect(await documents.availability(of: data) == .missing)
+    }
+
     @Test func withAccessBalances() async throws {
         let data = try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .fileImporter))
 

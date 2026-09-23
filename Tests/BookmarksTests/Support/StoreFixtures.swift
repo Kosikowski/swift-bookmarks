@@ -27,6 +27,9 @@ final class TestClock: Sendable {
 final class ScriptedPersistence<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: BookmarkPersistence {
     let base: InMemoryPersistence<Key, Metadata>
     private let failures = Mutex((load: 0, save: 0))
+    private let loads = Atomic(0)
+
+    var loadCount: Int { loads.load(ordering: .relaxed) }
 
     init(records: [BookmarkRecord<Key, Metadata>] = []) {
         base = InMemoryPersistence(records: records)
@@ -41,6 +44,7 @@ final class ScriptedPersistence<Key: Hashable & Sendable & Codable, Metadata: Se
     }
 
     func load() throws(PersistenceError) -> [BookmarkRecord<Key, Metadata>] {
+        loads.add(1, ordering: .relaxed)
         let fail = failures.withLock { state -> Bool in
             guard state.load > 0 else { return false }
             state.load -= 1

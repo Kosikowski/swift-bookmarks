@@ -33,6 +33,11 @@ struct SandboxEnvironmentTests {
         #expect(!SandboxEnvironment.current.isSandboxed)
     }
 
+    @Test func passwordDatabaseGivesTheHomeOfKnownUsersOnly() {
+        #expect(SandboxEnvironment.passwordHomeDirectory(of: getuid()) == NSHomeDirectoryForUser(NSUserName()))
+        #expect(SandboxEnvironment.passwordHomeDirectory(of: 4_000_000) == nil)
+    }
+
     @Test func realHomeIsNotAContainer() {
         let home = SandboxEnvironment.realHomeDirectory.path(percentEncoded: false)
 

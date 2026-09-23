@@ -31,6 +31,25 @@ struct BookmarkFailureTests {
     }
 }
 
+@Suite("BookmarkFailure log names")
+struct BookmarkFailureLogNameTests {
+    @Test(arguments: [
+        (BookmarkFailure.missing, "missing"),
+        (.volumeUnavailable(name: "Private Disk"), "volumeUnavailable"),
+        (.needsRegrant, "needsRegrant"),
+        (.denied, "denied"),
+        (.corrupt, "corrupt"),
+        (.refused(.tooBroad(path: "/Users/me")), "refused"),
+        (.unsupported(reason: "r"), "unsupported"),
+        (.timedOut, "timedOut"),
+        (.cancelled, "cancelled"),
+        (.other(domain: "D", code: 1), "other"),
+    ])
+    func omitPayloadsThatMayHoldPaths(_ failure: BookmarkFailure, _ name: String) {
+        #expect(failure.caseName == name)
+    }
+}
+
 @Suite("BookmarkError")
 struct BookmarkErrorTests {
     @Test func descriptionIncludesFailurePathAndUnderlyingCode() {

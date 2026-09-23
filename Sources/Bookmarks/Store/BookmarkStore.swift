@@ -269,9 +269,8 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
             let access = resolved.beginAccess()
             defer { access.end() }
             let identity = await identity(of: access.url)
-            guard await commit(resolved, identity: identity, for: snapshot), let lease = register(resolved, for: snapshot) else {
-                continue
-            }
+            guard await commit(resolved, identity: identity, for: snapshot) else { continue }
+            let lease = registry.lease(for: key, resolved: resolved)
             await touch(key)
             return lease
         }
@@ -412,7 +411,6 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     }
 
     private func commit(_ failure: BookmarkFailure, for snapshot: Table.Snapshot) async {
-        guard failure != .cancelled else { return }
         let dropping = policy.failureHandling.drops(failure)
         let timestamp = now()
         do {
@@ -422,11 +420,6 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
         } catch {
             Log.store.error("Saving a bookmark's status failed: \(String(describing: error), privacy: .private)")
         }
-    }
-
-    private func register(_ resolved: ResolvedBookmark, for snapshot: Table.Snapshot) -> AccessLease? {
-        guard table.isCurrent(snapshot) else { return nil }
-        return registry.lease(for: snapshot.key, resolved: resolved)
     }
 
     private func touch(_ key: Key) async {

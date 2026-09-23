@@ -25,7 +25,9 @@ struct SingleFlightTests {
             runs.add(1, ordering: .relaxed)
             return 99
         }
-        try await Task.sleep(for: .milliseconds(20))
+        while flight.callers(where: { $0 == "key" }) < 3 {
+            await Task.yield()
+        }
         gate.open()
 
         let results = try await [first, second, third]
@@ -68,7 +70,9 @@ struct SingleFlightTests {
         }
         await gate.waitForWaiter()
         let second = Task { try await flight.run("key") { 1 } }
-        try? await Task.sleep(for: .milliseconds(20))
+        while flight.callers(where: { $0 == "key" }) < 2 {
+            await Task.yield()
+        }
         gate.open()
 
         await #expect(throws: Failure.self) { try await first.value }
@@ -93,6 +97,40 @@ struct SingleFlightTests {
         await #expect(throws: CancellationError.self) { try await cancelled.value }
         gate.open()
         #expect(try await patient.value == 5)
+    }
+
+    @Test func alreadyCancelledCallersDontWait() async throws {
+        let flight = SingleFlight<String, Int>()
+        let gate = AsyncGate()
+
+        let owner = Task { try await flight.run("key") { await gate.wait(); return 1 } }
+        await gate.waitForWaiter()
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await flight.run("key") { 2 }
+        }
+
+        await #expect(throws: CancellationError.self) { try await cancelled.value }
+        gate.open()
+        #expect(try await owner.value == 1)
+    }
+
+    @Test func countsCallersPerKey() async {
+        let flight = SingleFlight<String, Int>()
+        let gate = AsyncGate()
+
+        let tasks = (0..<3).map { _ in Task { try await flight.run("a") { await gate.wait(); return 1 } } }
+        let other = Task { try await flight.run("b") { await gate.wait(); return 2 } }
+        while flight.callers(where: { _ in true }) < 4 {
+            await Task.yield()
+        }
+
+        #expect(flight.callers { $0 == "a" } == 3)
+        #expect(flight.callers { $0 == "b" } == 1)
+        #expect(flight.inFlightCount == 2)
+        gate.open()
+        for task in tasks { _ = try? await task.value }
+        _ = try? await other.value
     }
 }
 

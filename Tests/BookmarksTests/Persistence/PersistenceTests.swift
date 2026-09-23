@@ -67,6 +67,14 @@ struct PersistedEnvelopeTests {
         #expect(try Envelope.decode(data) == sampleRecords())
     }
 
+    @Test func reportsMetadataThatCantBeEncoded() {
+        let record = BookmarkRecord(key: "a", data: BookmarkData(Data()), kind: .reference, lastKnownPath: "/a", createdAt: Date(), metadata: Unencodable())
+
+        let error = #expect(throws: PersistenceError.self) { try PersistedEnvelope<String, Unencodable>.encode([record], pretty: false) }
+
+        #expect(error?.reason == .writeFailed)
+    }
+
     @Test func refusesNewerSchemas() {
         let data = Data(#"{"schemaVersion": 2, "records": []}"#.utf8)
 
@@ -423,6 +431,14 @@ struct MigratingPersistenceTests {
         marker.markComplete()
 
         #expect(MigrationMarker.userDefaults(key: "migrated", suiteName: suite).isComplete)
+    }
+
+    @Test func unavailableDefaultsSuitesNeverReportCompletion() {
+        let marker = MigrationMarker.userDefaults(key: "migrated", suiteName: UserDefaults.globalDomain)
+
+        marker.markComplete()
+
+        #expect(!marker.isComplete)
     }
 
     @Test func standardDefaultsMarker() {

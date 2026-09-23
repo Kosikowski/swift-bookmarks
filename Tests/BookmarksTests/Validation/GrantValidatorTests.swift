@@ -23,7 +23,10 @@ struct GrantValidatorTests {
     struct NotTooBroad {
         let base = GrantValidatorTests()
 
-        @Test(arguments: ["/", "/Users", "/Volumes", "/System", "/Library", "/Applications", "/private", "/Users/tester"])
+        @Test(arguments: [
+            "/", "/Users", "/Volumes", "/System", "/Library", "/Applications", "/private", "/Users/tester",
+            "/usr", "/etc", "/opt", "/tmp", "/Users/Shared", "/Users/someone", "/private/swift-bookmarks-missing", "/System/Volumes",
+        ])
         func refusesBroadLocations(_ path: String) {
             #expect(base.refusal(.notTooBroad, base.info(path)) == .tooBroad(path: path))
         }
@@ -37,6 +40,25 @@ struct GrantValidatorTests {
             let validator = NotTooBroadValidator(additionalPaths: ["/Users/tester/Developer"])
 
             #expect(base.refusal(validator, base.info("/Users/tester/Developer")) == .tooBroad(path: "/Users/tester/Developer"))
+        }
+
+        @Test func matchesAdditionalPathsWithTrailingSlashes() {
+            let validator = NotTooBroadValidator(additionalPaths: ["/Users/tester/Developer/"])
+
+            #expect(base.refusal(validator, base.info("/Users/tester/Developer")) == .tooBroad(path: "/Users/tester/Developer"))
+        }
+
+        @Test func matchesAdditionalPathsThroughSymbolicLinks() throws {
+            let root = FileManager.default.temporaryDirectory.appending(path: "swift-bookmarks-validator-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let real = root.appending(path: "Real")
+            let link = root.appending(path: "Link")
+            try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+            let canonical = NormalizedPath(real.resolvingSymlinksInPath()).string
+            let validator = NotTooBroadValidator(additionalPaths: [link.path(percentEncoded: false)])
+
+            #expect(base.refusal(validator, base.info(canonical)) == .tooBroad(path: canonical))
         }
     }
 
