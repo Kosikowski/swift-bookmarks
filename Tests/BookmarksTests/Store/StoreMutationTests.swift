@@ -13,13 +13,13 @@ struct StoreMutationTests {
 
         @Test func removesTheRecord() async throws {
             try await harness.add("a", "/Users/me/A")
-            let changes = harness.store.changes()
+            let changes = try await harness.store.updates()
 
             #expect(try await harness.store.forget("a"))
 
             #expect(try await harness.store.records().isEmpty)
             #expect(harness.saved.isEmpty)
-            #expect(await collect(changes, count: 1) == [.removed("a")])
+            #expect(await collect(changes, count: 1) == ["removed a"])
         }
 
         @Test func forgettingAnUnknownKeyChangesNothing() async throws {
@@ -43,12 +43,12 @@ struct StoreMutationTests {
         @Test func removeAllClearsEverything() async throws {
             try await harness.add("a", "/Users/me/A")
             try await harness.add("b", "/Users/me/B")
-            let changes = harness.store.changes()
+            let changes = try await harness.store.updates()
 
             try await harness.store.removeAll()
 
             #expect(try await harness.store.records().isEmpty)
-            #expect(Set(await collect(changes, count: 2)) == [.removed("a"), .removed("b")])
+            #expect(await collect(changes, count: 2) == ["removed a", "removed b"])
         }
     }
 
@@ -228,13 +228,13 @@ struct StoreMutationTests {
             for name in ["a", "b", "c"] {
                 try await harness.add(name, "/\(name)")
             }
-            let changes = harness.store.changes()
+            let changes = try await harness.store.updates()
 
             try await harness.add("d", "/d")
 
             #expect(try await harness.store.keys() == ["d", "c", "b"])
             #expect(harness.saved.map(\.key) == ["d", "c", "b"])
-            #expect(await collect(changes, count: 2) == [.added("d"), .removed("a")])
+            #expect(await collect(changes, count: 3) == ["removed a", "added d", "reordered d,c,b"])
         }
 
         @Test func addingAnExistingItemReturnsItAndMovesItToTheFront() async throws {
@@ -334,13 +334,13 @@ struct StoreMutationTests {
 
         @Test func everySubscriberSeesChanges() async throws {
             let harness = StoreHarness()
-            let first = harness.store.changes()
-            let second = harness.store.changes()
+            let first = try await harness.store.updates()
+            let second = try await harness.store.updates()
 
             try await harness.add("a", "/A")
 
-            #expect(await collect(first, count: 1) == [.added("a")])
-            #expect(await collect(second, count: 1) == [.added("a")])
+            #expect(await collect(first, count: 1) == ["added a"])
+            #expect(await collect(second, count: 1) == ["added a"])
         }
     }
 }

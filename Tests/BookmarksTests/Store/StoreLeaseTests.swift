@@ -151,11 +151,11 @@ struct StoreLeaseTests {
         @Test func publishesAnUpdate() async throws {
             try await harness.add("a", "/Users/me/A")
             harness.engine.moveItem(from: "/Users/me/A", to: "/Users/me/Renamed")
-            let changes = harness.store.changes()
+            let changes = try await harness.store.updates()
 
             try await harness.store.lease("a").end()
 
-            #expect(await collect(changes, count: 1) == [.updated("a")])
+            #expect(await collect(changes, count: 1) == ["updated a"])
         }
 
         @Test func unchangedRecordsAreNotSavedAgain() async throws {
@@ -205,13 +205,13 @@ struct StoreLeaseTests {
             let harness = StoreHarness(policy: StorePolicy(failureHandling: .dropMissing))
             try await harness.add("a", "/Users/me/A")
             harness.engine.removeItem(at: "/Users/me/A")
-            let changes = harness.store.changes()
+            let changes = try await harness.store.updates()
 
             _ = try? await harness.store.lease("a")
 
             #expect(try await harness.store.record("a") == nil)
             #expect(harness.saved.isEmpty)
-            #expect(await collect(changes, count: 1) == [.removed("a")])
+            #expect(await collect(changes, count: 1) == ["removed a"])
         }
 
         @Test func dropMissingKeepsUnmountedVolumes() async throws {

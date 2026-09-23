@@ -31,7 +31,7 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     private var loading: Task<Result<[Record], PersistenceError>, Never>?
     private let writes = AsyncLock()
     private let resolutions = SingleFlight<Flight, ResolvedBookmark>()
-    private let observers = Mutex<[UUID: AsyncStream<StoreChange<Key>>.Continuation]>([:])
+    private let observers = Mutex<[UUID: AsyncStream<StoreUpdate<Key, Metadata>>.Continuation]>([:])
     private let now: @Sendable () -> Date
 
     private struct Flight: Hashable, Sendable {
@@ -95,8 +95,9 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
             case .success(let loaded): records = loaded
             case .failure(let error): throw .persistence(error)
             }
-            let changes = table.replaceAll(with: records)
-            return (changes, table.takeInvalidated())
+            let old = table
+            table.replaceAll(with: records)
+            return table.takeChanges(since: old)
         }
         finish(changes, invalidating: invalidated)
     }
@@ -134,15 +135,19 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
         return table.key(matching: identity, path: NormalizedPath(url))
     }
 
-    /// A stream of changes to the records. Each call returns a new stream.
+    /// The records in order, then every change to them.
     ///
-    /// The default policy buffers every change until it's read; pass a bounded policy for
-    /// subscribers that may stop reading without cancelling.
-    public nonisolated func changes(
-        bufferingPolicy: AsyncStream<StoreChange<Key>>.Continuation.BufferingPolicy = .unbounded
-    ) -> AsyncStream<StoreChange<Key>> {
-        let (stream, continuation) = AsyncStream<StoreChange<Key>>.makeStream(bufferingPolicy: bufferingPolicy)
+    /// The snapshot and the subscription are taken together, so no change falls between
+    /// them. Each call returns a new stream. The default policy buffers every update until
+    /// it's read; pass a bounded policy for subscribers that may stop reading without
+    /// cancelling.
+    public func updates(
+        bufferingPolicy: AsyncStream<StoreUpdate<Key, Metadata>>.Continuation.BufferingPolicy = .unbounded
+    ) async throws(Failure) -> AsyncStream<StoreUpdate<Key, Metadata>> {
+        try await load()
+        let (stream, continuation) = AsyncStream<StoreUpdate<Key, Metadata>>.makeStream(bufferingPolicy: bufferingPolicy)
         let id = UUID()
+        continuation.yield(.snapshot(table.orderedRecords))
         observers.withLock { $0[id] = continuation }
         continuation.onTermination = { [weak self] _ in
             self?.observers.withLock { _ = $0.removeValue(forKey: id) }
@@ -165,8 +170,8 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
             if policy.duplicates != .allow,
                let existing = table.duplicate(of: resolved.fileIdentity, path: path, excluding: key) {
                 guard policy.duplicates == .returnExisting else { throw .duplicate(of: existing.key) }
-                let moved = table.promote(existing.key, ordering: policy.ordering)
-                return (existing, moved ? [.updated(existing.key)] : [])
+                table.promote(existing.key, ordering: policy.ordering)
+                return existing
             }
             let previous = table[key]
             let record = Record(
@@ -180,9 +185,9 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
                 refreshedAt: previous == nil ? nil : timestamp,
                 metadata: metadata
             )
-            let change = table.put(record, ordering: policy.ordering)
-            let evicted = table.evict(beyond: policy.limit, keeping: key)
-            return (record, [change] + evicted.map(StoreChange.removed))
+            table.put(record, ordering: policy.ordering)
+            table.evict(beyond: policy.limit, keeping: key)
+            return record
         }
     }
 
@@ -214,7 +219,7 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
             ) else {
                 throw .notFound(key)
             }
-            return (record, [.updated(key)])
+            return record
         }
     }
 
@@ -224,14 +229,14 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     @discardableResult
     public func forget(_ key: Key) async throws(Failure) -> Bool {
         try await mutate { table throws(Failure) in
-            table.remove(key) ? (true, [.removed(key)]) : (false, [])
+            table.remove(key)
         }
     }
 
     /// Removes every record. Active leases keep access until they end.
     public func removeAll() async throws(Failure) {
         try await mutate { table throws(Failure) in
-            ((), table.removeAll().map(StoreChange.removed))
+            table.removeAll()
         }
     }
 
@@ -239,7 +244,6 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     public func updateMetadata(_ key: Key, _ change: sending (inout Metadata) -> Void) async throws(Failure) {
         try await mutate { table throws(Failure) in
             guard table.updateMetadata(of: key, change) else { throw .notFound(key) }
-            return ((), [.updated(key)])
         }
     }
 
@@ -247,7 +251,6 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     public func move(_ key: Key, to index: Int) async throws(Failure) {
         try await mutate { table throws(Failure) in
             guard table.move(key, to: index) else { throw .notFound(key) }
-            return ((), [.updated(key)])
         }
     }
 
@@ -396,11 +399,7 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
         )
         do {
             return try await mutate { table throws(Failure) in
-                switch table.applySuccess(resolution, to: snapshot) {
-                case .superseded: (false, [])
-                case .unchanged: (true, [])
-                case .changed: (true, [.updated(snapshot.key)])
-                }
+                table.applySuccess(resolution, to: snapshot) != .superseded
             }
         } catch {
             Log.store.error("Saving a resolved bookmark failed: \(String(describing: error), privacy: .private)")
@@ -413,7 +412,7 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
         let timestamp = now()
         do {
             try await mutate { table throws(Failure) in
-                ((), table.applyFailure(failure, to: snapshot, dropping: dropping, at: timestamp).map { [$0] } ?? [])
+                table.applyFailure(failure, to: snapshot, dropping: dropping, at: timestamp)
             }
         } catch {
             Log.store.error("Saving a bookmark's status failed: \(String(describing: error), privacy: .private)")
@@ -423,7 +422,7 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     private func touch(_ key: Key) async {
         guard policy.ordering == .mostRecentlyUsed else { return }
         _ = try? await mutate { table throws(Failure) in
-            ((), table.promote(key, ordering: policy.ordering) ? [.updated(key)] : [])
+            table.promote(key, ordering: policy.ordering)
         }
     }
 
@@ -449,13 +448,13 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
 
     @discardableResult
     private func mutate<T>(
-        _ body: (inout Table) throws(Failure) -> (T, [StoreChange<Key>])
+        _ body: (inout Table) throws(Failure) -> T
     ) async throws(Failure) -> T {
         try await load()
         let (result, changes, invalidated) = try await writes.withLock { () async throws(Failure) in
             var draft = table
-            let (result, changes) = try body(&draft)
-            let invalidated = draft.takeInvalidated()
+            let result = try body(&draft)
+            let (changes, invalidated) = draft.takeChanges(since: table)
             if !changes.isEmpty {
                 try await save(draft.orderedRecords)
             }
@@ -466,12 +465,12 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
         return result
     }
 
-    private nonisolated func finish(_ changes: [StoreChange<Key>], invalidating keys: Set<Key>) {
+    private nonisolated func finish(_ changes: [StoreChange<Key, Metadata>], invalidating keys: Set<Key>) {
         keys.forEach(registry.detach)
         guard !changes.isEmpty else { return }
         let continuations = observers.withLock { Array($0.values) }
         for continuation in continuations {
-            changes.forEach { continuation.yield($0) }
+            changes.forEach { continuation.yield(.change($0)) }
         }
     }
 

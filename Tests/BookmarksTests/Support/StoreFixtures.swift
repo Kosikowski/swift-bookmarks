@@ -100,11 +100,23 @@ struct StoreHarness {
     }
 }
 
-func collect<Key>(_ stream: AsyncStream<StoreChange<Key>>, count: Int) async -> [StoreChange<Key>] {
-    var changes: [StoreChange<Key>] = []
-    for await change in stream {
-        changes.append(change)
+func collect<Key, Metadata>(_ stream: AsyncStream<StoreUpdate<Key, Metadata>>, count: Int) async -> [String] {
+    var changes: [String] = []
+    for await update in stream {
+        guard case .change(let change) = update else { continue }
+        changes.append(change.summary)
         if changes.count == count { break }
     }
     return changes
+}
+
+extension StoreChange {
+    var summary: String {
+        switch self {
+        case .added(let record): "added \(record.key)"
+        case .updated(let record): "updated \(record.key)"
+        case .removed(let key): "removed \(key)"
+        case .reordered(let keys): "reordered \(keys.map { "\($0)" }.joined(separator: ","))"
+        }
+    }
 }

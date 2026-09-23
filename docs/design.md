@@ -250,7 +250,8 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     public func availability(_ key: Key) async throws -> Availability
     public func refreshStatuses() async throws(BookmarkStoreError<Key>) -> [Key]  // e.g. on volume mount
 
-    public nonisolated func changes(bufferingPolicy: …= .unbounded) -> AsyncStream<StoreChange<Key>>
+    // A snapshot, then every change carrying the record as it is after the change.
+    public func updates(bufferingPolicy: …= .unbounded) async throws -> AsyncStream<StoreUpdate<Key, Metadata>>
 }
 
 public struct BookmarkRecord<Key, Metadata>: Sendable, Codable {

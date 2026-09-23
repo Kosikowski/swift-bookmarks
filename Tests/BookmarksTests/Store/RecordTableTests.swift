@@ -28,6 +28,10 @@ struct RecordTableTests {
         )
     }
 
+    static func table(_ keys: String...) -> Table {
+        Table(keys.map { record($0) })
+    }
+
     static func resolution(of data: String, path: String = "/moved", refreshed: String? = nil, identity: FileIdentity? = nil) -> Table.Resolution {
         Table.Resolution(
             originalData: BookmarkData(Data(data.utf8)),
@@ -38,6 +42,19 @@ struct RecordTableTests {
         )
     }
 
+    struct Transaction<Result> {
+        let result: Result
+        let changes: [String]
+        let invalidated: Set<String>
+    }
+
+    static func transaction<Result>(_ table: inout Table, _ body: (inout Table) -> Result) -> Transaction<Result> {
+        let old = table
+        let result = body(&table)
+        let (changes, invalidated) = table.takeChanges(since: old)
+        return Transaction(result: result, changes: changes.map(\.summary), invalidated: invalidated)
+    }
+
     @Test func loadingKeepsTheFirstRecordForEachKey() {
         let table = Table([Self.record("a"), Self.record("b"), Self.record("a", data: "other")])
 
@@ -45,48 +62,69 @@ struct RecordTableTests {
         #expect(table["a"]?.data == BookmarkData(Data("a".utf8)))
     }
 
+    @Test func transactionsWithoutChangesReportNothing() {
+        var table = Self.table("a")
+
+        let transaction = Self.transaction(&table) { _ in }
+
+        #expect(transaction.changes.isEmpty)
+        #expect(transaction.invalidated.isEmpty)
+    }
+
+    @Test func changesCarryTheCurrentRecords() {
+        var table = Self.table("a")
+
+        let old = table
+        _ = table.updateMetadata(of: "a") { $0.name = "renamed" }
+        let (changes, _) = table.takeChanges(since: old)
+
+        guard case .updated(let record)? = changes.first else {
+            Issue.record("Expected an update, got \(changes)")
+            return
+        }
+        #expect(record.metadata.name == "renamed")
+    }
+
     @Suite("Adding")
     struct Adding {
         @Test func newKeysAreAppendedAndReportedAsAdded() {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
 
-            let change = table.put(RecordTableTests.record("b"), ordering: .insertion)
-            let invalidated = table.takeInvalidated()
+            let transaction = RecordTableTests.transaction(&table) { $0.put(RecordTableTests.record("b"), ordering: .insertion) }
 
-            #expect(change == .added("b"))
+            #expect(transaction.changes == ["added b"])
+            #expect(transaction.invalidated == ["b"])
             #expect(table.order == ["a", "b"])
-            #expect(invalidated == ["b"])
         }
 
         @Test func existingKeysKeepTheirPlaceAndAreReportedAsUpdated() {
-            var table = Table([RecordTableTests.record("a"), RecordTableTests.record("b")])
+            var table = RecordTableTests.table("a", "b")
 
-            let change = table.put(RecordTableTests.record("a", data: "new"), ordering: .insertion)
+            let transaction = RecordTableTests.transaction(&table) { $0.put(RecordTableTests.record("a", data: "new"), ordering: .insertion) }
 
-            #expect(change == .updated("a"))
+            #expect(transaction.changes == ["updated a"])
+            #expect(transaction.invalidated == ["a"])
             #expect(table.order == ["a", "b"])
-            #expect(table["a"]?.data == BookmarkData(Data("new".utf8)))
         }
 
         @Test func mostRecentlyUsedOrderingPutsNewRecordsFirst() {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
 
-            _ = table.put(RecordTableTests.record("b"), ordering: .mostRecentlyUsed)
+            let transaction = RecordTableTests.transaction(&table) { $0.put(RecordTableTests.record("b"), ordering: .mostRecentlyUsed) }
 
-            #expect(table.order == ["b", "a"])
+            #expect(transaction.changes == ["added b", "reordered b,a"])
         }
 
         @Test func evictsTheLastRecordsButNeverTheKeptOne() {
-            var table = Table(["a", "b", "c"].map { RecordTableTests.record($0) })
+            var table = RecordTableTests.table("a", "b", "c")
 
-            let evicted = table.evict(beyond: 1, keeping: "c")
-            let unlimited = table.evict(beyond: nil, keeping: "c")
-            let invalidated = table.takeInvalidated()
+            let evicting = RecordTableTests.transaction(&table) { $0.evict(beyond: 1, keeping: "c") }
+            let unlimited = RecordTableTests.transaction(&table) { $0.evict(beyond: nil, keeping: "c") }
 
-            #expect(evicted == ["b", "a"])
-            #expect(unlimited.isEmpty)
+            #expect(evicting.changes == ["removed a", "removed b"])
+            #expect(evicting.invalidated == ["a", "b"])
+            #expect(unlimited.changes.isEmpty)
             #expect(table.order == ["c"])
-            #expect(invalidated == ["a", "b"])
         }
     }
 
@@ -131,7 +169,7 @@ struct RecordTableTests {
         }
 
         @Test func pathsExcludeTheGivenKey() {
-            let table = Table([RecordTableTests.record("a"), RecordTableTests.record("b")])
+            let table = RecordTableTests.table("a", "b")
 
             #expect(table.paths(excluding: "a") == ["/b"])
         }
@@ -143,127 +181,135 @@ struct RecordTableTests {
             let identity = FileIdentity(volumeUUID: "V", fileID: 1)
             var table = Table([RecordTableTests.record("a", identity: identity, status: .unavailable(.missing, since: RecordTableTests.date))])
 
-            let replaced = table.replaceItem(
-                of: "a",
-                data: BookmarkData(Data("new".utf8)),
-                kind: .reference,
-                path: "/new",
-                identity: nil,
-                date: RecordTableTests.date,
-                ordering: .insertion
-            )
-            let invalidated = table.takeInvalidated()
+            let transaction = RecordTableTests.transaction(&table) {
+                $0.replaceItem(
+                    of: "a",
+                    data: BookmarkData(Data("new".utf8)),
+                    kind: .reference,
+                    path: "/new",
+                    identity: nil,
+                    date: RecordTableTests.date,
+                    ordering: .insertion
+                )
+            }
 
-            let record = try #require(replaced)
+            let record = try #require(transaction.result)
             #expect(record.fileIdentity == identity)
             #expect(record.status == .available)
             #expect(record.kind == .reference)
             #expect(record.refreshedAt == RecordTableTests.date)
-            #expect(invalidated == ["a"])
+            #expect(transaction.changes == ["updated a"])
+            #expect(transaction.invalidated == ["a"])
         }
 
         @Test func replacingAnUnknownKeyDoesNothing() {
             var table = Table()
 
-            let replaced = table.replaceItem(of: "a", data: BookmarkData(Data()), kind: .reference, path: "/", identity: nil, date: RecordTableTests.date, ordering: .insertion)
-            let invalidated = table.takeInvalidated()
+            let transaction = RecordTableTests.transaction(&table) {
+                $0.replaceItem(of: "a", data: BookmarkData(Data()), kind: .reference, path: "/", identity: nil, date: RecordTableTests.date, ordering: .insertion)
+            }
 
-            #expect(replaced == nil)
-            #expect(invalidated.isEmpty)
+            #expect(transaction.result == nil)
+            #expect(transaction.changes.isEmpty)
         }
 
         @Test func metadataChangesDontInvalidate() {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
 
-            let updatedKnown = table.updateMetadata(of: "a") { $0.name = "renamed" }
-            let updatedUnknown = table.updateMetadata(of: "missing") { $0.name = "x" }
-            let invalidated = table.takeInvalidated()
+            let known = RecordTableTests.transaction(&table) { $0.updateMetadata(of: "a") { $0.name = "renamed" } }
+            let unknown = RecordTableTests.transaction(&table) { $0.updateMetadata(of: "missing") { $0.name = "x" } }
 
-            #expect(updatedKnown)
-            #expect(!updatedUnknown)
+            #expect(known.result && !unknown.result)
+            #expect(known.changes == ["updated a"])
+            #expect(known.invalidated.isEmpty)
+            #expect(unknown.changes.isEmpty)
             #expect(table["a"]?.metadata.name == "renamed")
-            #expect(invalidated.isEmpty)
         }
 
         @Test func removingReportsWhetherAnythingWasThere() {
-            var table = Table([RecordTableTests.record("a"), RecordTableTests.record("b")])
+            var table = RecordTableTests.table("a", "b", "c")
 
-            let first = table.remove("a")
-            let second = table.remove("a")
-            let rest = table.removeAll()
+            let first = RecordTableTests.transaction(&table) { $0.remove("a") }
+            let second = RecordTableTests.transaction(&table) { $0.remove("a") }
+            let rest = RecordTableTests.transaction(&table) { $0.removeAll() }
 
-            #expect(first)
-            #expect(!second)
-            #expect(rest == ["b"])
+            #expect(first.result && !second.result)
+            #expect(first.changes == ["removed a"])
+            #expect(second.changes.isEmpty)
+            #expect(rest.changes == ["removed b", "removed c"])
             #expect(table.orderedRecords.isEmpty)
         }
 
-        @Test func movingClampsTheIndex() {
-            var table = Table(["a", "b", "c"].map { RecordTableTests.record($0) })
+        @Test func movingClampsTheIndexAndReportsTheNewOrder() {
+            var table = RecordTableTests.table("a", "b", "c")
 
-            let movedPastTheEnd = table.move("a", to: 10)
-            let orderAfterFirstMove = table.order
-            let movedBeforeTheStart = table.move("a", to: -3)
-            let movedUnknown = table.move("missing", to: 0)
+            let pastTheEnd = RecordTableTests.transaction(&table) { $0.move("a", to: 10) }
+            let beforeTheStart = RecordTableTests.transaction(&table) { $0.move("a", to: -3) }
+            let unknown = RecordTableTests.transaction(&table) { $0.move("missing", to: 0) }
 
-            #expect(movedPastTheEnd && movedBeforeTheStart && !movedUnknown)
-            #expect(orderAfterFirstMove == ["b", "c", "a"])
-            #expect(table.order == ["a", "b", "c"])
+            #expect(pastTheEnd.result && beforeTheStart.result && !unknown.result)
+            #expect(pastTheEnd.changes == ["reordered b,c,a"])
+            #expect(beforeTheStart.changes == ["reordered a,b,c"])
+            #expect(unknown.changes.isEmpty)
         }
 
         @Test func promotingOnlyMovesForRecentsOrdering() {
-            var table = Table(["a", "b"].map { RecordTableTests.record($0) })
+            var table = RecordTableTests.table("a", "b")
 
-            let withInsertionOrder = table.promote("b", ordering: .insertion)
-            let withRecentsOrder = table.promote("b", ordering: .mostRecentlyUsed)
-            let whenAlreadyFirst = table.promote("b", ordering: .mostRecentlyUsed)
-            let whenUnknown = table.promote("missing", ordering: .mostRecentlyUsed)
+            let insertion = RecordTableTests.transaction(&table) { $0.promote("b", ordering: .insertion) }
+            let recents = RecordTableTests.transaction(&table) { $0.promote("b", ordering: .mostRecentlyUsed) }
+            let alreadyFirst = RecordTableTests.transaction(&table) { $0.promote("b", ordering: .mostRecentlyUsed) }
+            let unknown = RecordTableTests.transaction(&table) { $0.promote("missing", ordering: .mostRecentlyUsed) }
 
-            #expect(!withInsertionOrder && withRecentsOrder && !whenAlreadyFirst && !whenUnknown)
-            #expect(table.order == ["b", "a"])
+            #expect(insertion.changes.isEmpty)
+            #expect(recents.changes == ["reordered b,a"])
+            #expect(alreadyFirst.changes.isEmpty)
+            #expect(unknown.changes.isEmpty)
         }
     }
 
     @Suite("Resolution results")
     struct Results {
         @Test func successIsSupersededOnceTheRecordChanges() throws {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
             let snapshot = try #require(table.snapshot("a"))
-            _ = table.put(RecordTableTests.record("a", data: "regranted"), ordering: .insertion)
+            _ = RecordTableTests.transaction(&table) { $0.put(RecordTableTests.record("a", data: "regranted"), ordering: .insertion) }
 
-            let outcome = table.applySuccess(RecordTableTests.resolution(of: "a"), to: snapshot)
+            let transaction = RecordTableTests.transaction(&table) { $0.applySuccess(RecordTableTests.resolution(of: "a"), to: snapshot) }
 
             #expect(!table.isCurrent(snapshot))
-            #expect(outcome == .superseded)
+            #expect(transaction.result == .superseded)
+            #expect(transaction.changes.isEmpty)
             #expect(table["a"]?.lastKnownPath == "/a")
         }
 
         @Test func successIsSupersededForOtherBytes() throws {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
             let snapshot = try #require(table.snapshot("a"))
 
-            let outcome = table.applySuccess(RecordTableTests.resolution(of: "other"), to: snapshot)
+            let transaction = RecordTableTests.transaction(&table) { $0.applySuccess(RecordTableTests.resolution(of: "other"), to: snapshot) }
 
-            #expect(outcome == .superseded)
+            #expect(transaction.result == .superseded)
         }
 
         @Test func successIsSupersededOnceTheRecordIsGone() throws {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
             let snapshot = try #require(table.snapshot("a"))
             _ = table.remove("a")
 
-            let outcome = table.applySuccess(RecordTableTests.resolution(of: "a"), to: snapshot)
+            let transaction = RecordTableTests.transaction(&table) { $0.applySuccess(RecordTableTests.resolution(of: "a"), to: snapshot) }
 
-            #expect(outcome == .superseded)
+            #expect(transaction.result == .superseded)
         }
 
         @Test func unchangedResultsReportNoChange() throws {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
             let snapshot = try #require(table.snapshot("a"))
 
-            let outcome = table.applySuccess(RecordTableTests.resolution(of: "a", path: "/a"), to: snapshot)
+            let transaction = RecordTableTests.transaction(&table) { $0.applySuccess(RecordTableTests.resolution(of: "a", path: "/a"), to: snapshot) }
 
-            #expect(outcome == .unchanged)
+            #expect(transaction.result == .unchanged)
+            #expect(transaction.changes.isEmpty)
         }
 
         @Test func successStoresRefreshedBytesPathAndIdentity() throws {
@@ -271,60 +317,66 @@ struct RecordTableTests {
             var table = Table([RecordTableTests.record("a", status: .unavailable(.missing, since: RecordTableTests.date))])
             let snapshot = try #require(table.snapshot("a"))
 
-            let outcome = table.applySuccess(RecordTableTests.resolution(of: "a", refreshed: "fresh", identity: identity), to: snapshot)
-            let invalidated = table.takeInvalidated()
+            let transaction = RecordTableTests.transaction(&table) {
+                $0.applySuccess(RecordTableTests.resolution(of: "a", refreshed: "fresh", identity: identity), to: snapshot)
+            }
 
             let record = try #require(table["a"])
-            #expect(outcome == .changed)
+            #expect(transaction.result == .changed)
+            #expect(transaction.changes == ["updated a"])
+            #expect(transaction.invalidated.isEmpty)
             #expect(record.data == BookmarkData(Data("fresh".utf8)))
             #expect(record.lastKnownPath == "/moved")
             #expect(record.fileIdentity == identity)
             #expect(record.status == .available)
             #expect(record.refreshedAt == RecordTableTests.date.addingTimeInterval(60))
-            #expect(invalidated.isEmpty)
         }
 
         @Test func failuresMarkTheRecordOnce() throws {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
             let snapshot = try #require(table.snapshot("a"))
 
-            let first = table.applyFailure(.missing, to: snapshot, dropping: false, at: RecordTableTests.date)
-            let repeated = table.applyFailure(.missing, to: snapshot, dropping: false, at: RecordTableTests.date.addingTimeInterval(1))
+            let first = RecordTableTests.transaction(&table) { $0.applyFailure(.missing, to: snapshot, dropping: false, at: RecordTableTests.date) }
+            let repeated = RecordTableTests.transaction(&table) {
+                $0.applyFailure(.missing, to: snapshot, dropping: false, at: RecordTableTests.date.addingTimeInterval(1))
+            }
             let statusAfterRepeat = table["a"]?.status
-            let different = table.applyFailure(.denied, to: snapshot, dropping: false, at: RecordTableTests.date)
+            let different = RecordTableTests.transaction(&table) { $0.applyFailure(.denied, to: snapshot, dropping: false, at: RecordTableTests.date) }
 
-            #expect(first == .updated("a"))
-            #expect(repeated == nil)
+            #expect(first.changes == ["updated a"])
+            #expect(repeated.changes.isEmpty)
             #expect(statusAfterRepeat == .unavailable(.missing, since: RecordTableTests.date))
-            #expect(different == .updated("a"))
+            #expect(different.changes == ["updated a"])
         }
 
         @Test func failuresCanDropTheRecord() throws {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
             let snapshot = try #require(table.snapshot("a"))
 
-            let change = table.applyFailure(.missing, to: snapshot, dropping: true, at: RecordTableTests.date)
+            let transaction = RecordTableTests.transaction(&table) { $0.applyFailure(.missing, to: snapshot, dropping: true, at: RecordTableTests.date) }
 
-            #expect(change == .removed("a"))
+            #expect(transaction.changes == ["removed a"])
             #expect(table["a"] == nil)
         }
 
         @Test func failuresForSupersededSnapshotsAreIgnored() throws {
-            var table = Table([RecordTableTests.record("a")])
+            var table = RecordTableTests.table("a")
             let snapshot = try #require(table.snapshot("a"))
-            _ = table.remove("a")
-            _ = table.put(RecordTableTests.record("a"), ordering: .insertion)
+            _ = RecordTableTests.transaction(&table) { table in
+                _ = table.remove("a")
+                table.put(RecordTableTests.record("a"), ordering: .insertion)
+            }
 
-            let change = table.applyFailure(.missing, to: snapshot, dropping: true, at: RecordTableTests.date)
+            let transaction = RecordTableTests.transaction(&table) { $0.applyFailure(.missing, to: snapshot, dropping: true, at: RecordTableTests.date) }
 
-            #expect(change == nil)
+            #expect(transaction.changes.isEmpty)
             #expect(table["a"] != nil)
         }
     }
 
     @Suite("Reloading")
     struct Reloading {
-        @Test func reportsAddedRemovedAndUpdatedRecords() {
+        @Test func reportsAddedRemovedUpdatedAndReorderedRecords() {
             var table = Table([
                 RecordTableTests.record("kept"),
                 RecordTableTests.record("removed"),
@@ -333,27 +385,44 @@ struct RecordTableTests {
                 RecordTableTests.record("marked"),
             ])
 
-            let changes = table.replaceAll(with: [
-                RecordTableTests.record("added"),
-                RecordTableTests.record("kept"),
-                RecordTableTests.record("rebookmarked", data: "new"),
-                RecordTableTests.record("retagged", tag: "new tag"),
-                RecordTableTests.record("marked", status: .unavailable(.denied, since: RecordTableTests.date)),
-            ])
-            let invalidated = table.takeInvalidated()
+            let transaction = RecordTableTests.transaction(&table) {
+                $0.replaceAll(with: [
+                    RecordTableTests.record("added"),
+                    RecordTableTests.record("kept"),
+                    RecordTableTests.record("rebookmarked", data: "new"),
+                    RecordTableTests.record("retagged", tag: "new tag"),
+                    RecordTableTests.record("marked", status: .unavailable(.denied, since: RecordTableTests.date)),
+                ])
+            }
 
-            #expect(changes == [.removed("removed"), .added("added"), .updated("rebookmarked"), .updated("retagged"), .updated("marked")])
-            #expect(table.order == ["added", "kept", "rebookmarked", "retagged", "marked"])
-            #expect(invalidated == ["removed", "added", "rebookmarked"])
+            #expect(transaction.changes == [
+                "removed removed",
+                "added added",
+                "updated rebookmarked",
+                "updated retagged",
+                "updated marked",
+                "reordered added,kept,rebookmarked,retagged,marked",
+            ])
+            #expect(transaction.invalidated == ["removed", "added", "rebookmarked"])
+        }
+
+        @Test func identicalRecordsReportNothing() {
+            var table = RecordTableTests.table("a", "b")
+
+            let transaction = RecordTableTests.transaction(&table) { $0.replaceAll(with: [RecordTableTests.record("a"), RecordTableTests.record("b")]) }
+
+            #expect(transaction.changes.isEmpty)
         }
 
         @Test func metadataThatCantBeEncodedCountsAsChanged() {
             let record = BookmarkRecord(key: "a", data: BookmarkData(Data()), kind: .reference, lastKnownPath: "/a", createdAt: RecordTableTests.date, metadata: Unencodable())
             var table = RecordTable<String, Unencodable>([record])
 
-            let changes = table.replaceAll(with: [record])
+            let old = table
+            table.replaceAll(with: [record])
+            let (changes, _) = table.takeChanges(since: old)
 
-            #expect(changes == [.updated("a")])
+            #expect(changes.map(\.summary) == ["updated a"])
         }
     }
 }

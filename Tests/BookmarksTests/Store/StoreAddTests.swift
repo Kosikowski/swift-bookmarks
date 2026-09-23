@@ -25,11 +25,11 @@ struct StoreAddTests {
     }
 
     @Test func publishesAnAddedChange() async throws {
-        let changes = harness.store.changes()
+        let changes = try await harness.store.updates()
 
         try await harness.add("a", "/Users/me/A")
 
-        #expect(await collect(changes, count: 1) == [.added("a")])
+        #expect(await collect(changes, count: 1) == ["added a"])
     }
 
     @Test func replacesTheRecordForAnExistingKey() async throws {

@@ -29,6 +29,7 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
     private var generations: [Key: UInt64] = [:]
     private var nextGeneration: UInt64 = 0
     private var invalidated: Set<Key> = []
+    private var modified: Set<Key> = []
 
     init(_ loaded: [Record] = []) {
         for record in loaded where records[record.key] == nil {
@@ -83,15 +84,14 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
             .map(\.key)
     }
 
-    mutating func put(_ record: Record, ordering: RecordOrdering) -> StoreChange<Key> {
-        let isNew = records[record.key] == nil
-        records[record.key] = record
-        if isNew {
+    mutating func put(_ record: Record, ordering: RecordOrdering) {
+        if records[record.key] == nil {
             order.append(record.key)
         }
+        records[record.key] = record
+        modified.insert(record.key)
         invalidate(record.key)
         promote(record.key, ordering: ordering)
-        return isNew ? .added(record.key) : .updated(record.key)
     }
 
     mutating func replaceItem(
@@ -111,6 +111,7 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
         record.status = .available
         record.refreshedAt = date
         records[key] = record
+        modified.insert(key)
         invalidate(key)
         promote(key, ordering: ordering)
         return record
@@ -119,6 +120,7 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
     mutating func updateMetadata(of key: Key, _ change: (inout Metadata) -> Void) -> Bool {
         guard records[key] != nil else { return false }
         change(&records[key]!.metadata)
+        modified.insert(key)
         return true
     }
 
@@ -129,10 +131,8 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
         return true
     }
 
-    mutating func removeAll() -> [Key] {
-        let removed = order
-        removed.forEach { _ = remove($0) }
-        return removed
+    mutating func removeAll() {
+        order.forEach { _ = remove($0) }
     }
 
     mutating func move(_ key: Key, to index: Int) -> Bool {
@@ -142,22 +142,17 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
         return true
     }
 
-    @discardableResult
-    mutating func promote(_ key: Key, ordering: RecordOrdering) -> Bool {
-        guard ordering == .mostRecentlyUsed, records[key] != nil, order.first != key else { return false }
+    mutating func promote(_ key: Key, ordering: RecordOrdering) {
+        guard ordering == .mostRecentlyUsed, records[key] != nil else { return }
         order.removeAll { $0 == key }
         order.insert(key, at: 0)
-        return true
     }
 
-    mutating func evict(beyond limit: Int?, keeping key: Key) -> [Key] {
-        guard let limit else { return [] }
-        var evicted: [Key] = []
+    mutating func evict(beyond limit: Int?, keeping key: Key) {
+        guard let limit else { return }
         while order.count > limit, let victim = order.last(where: { $0 != key }) {
             _ = remove(victim)
-            evicted.append(victim)
         }
-        return evicted
     }
 
     mutating func applySuccess(_ resolution: Resolution, to snapshot: Snapshot) -> Outcome {
@@ -174,6 +169,7 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
         record.status = .available
         guard !Self.sameState(before, record) else { return .unchanged }
         records[snapshot.key] = record
+        modified.insert(snapshot.key)
         return .changed
     }
 
@@ -182,49 +178,56 @@ struct RecordTable<Key: Hashable & Sendable & Codable, Metadata: Sendable & Coda
         to snapshot: Snapshot,
         dropping: Bool,
         at date: Date
-    ) -> StoreChange<Key>? {
-        guard isCurrent(snapshot), var record = records[snapshot.key] else { return nil }
+    ) {
+        guard isCurrent(snapshot), var record = records[snapshot.key] else { return }
         if dropping {
             _ = remove(snapshot.key)
-            return .removed(snapshot.key)
+        } else if record.status.failure != failure {
+            record.status = .unavailable(failure, since: date)
+            records[snapshot.key] = record
+            modified.insert(snapshot.key)
         }
-        if record.status.failure == failure {
-            return nil
-        }
-        record.status = .unavailable(failure, since: date)
-        records[snapshot.key] = record
-        return .updated(snapshot.key)
     }
 
-    mutating func replaceAll(with loaded: [Record]) -> [StoreChange<Key>] {
+    mutating func replaceAll(with loaded: [Record]) {
         let fresh = RecordTable(loaded)
-        var changes: [StoreChange<Key>] = []
         for key in order where fresh.records[key] == nil {
             invalidate(key)
-            changes.append(.removed(key))
         }
         for key in fresh.order {
             let new = fresh.records[key]!
-            if let old = records[key] {
-                if old.data != new.data || old.kind != new.kind {
-                    invalidate(key)
-                }
-                if !Self.sameState(old, new) || !Self.sameMetadata(old, new) {
-                    changes.append(.updated(key))
-                }
-            } else {
+            guard let old = records[key] else {
                 invalidate(key)
-                changes.append(.added(key))
+                continue
+            }
+            if old.data != new.data || old.kind != new.kind {
+                invalidate(key)
+            }
+            if !Self.sameState(old, new) || !Self.sameMetadata(old, new) {
+                modified.insert(key)
             }
         }
         records = fresh.records
         order = fresh.order
-        return changes
     }
 
-    mutating func takeInvalidated() -> Set<Key> {
-        defer { invalidated = [] }
-        return invalidated
+    /// The changes since `old`, which must be this table before the current transaction, and
+    /// the keys whose bookmark bytes are no longer the ones `old` held.
+    mutating func takeChanges(since old: RecordTable) -> (changes: [StoreChange<Key, Metadata>], invalidated: Set<Key>) {
+        defer {
+            invalidated = []
+            modified = []
+        }
+        var changes: [StoreChange<Key, Metadata>] = old.order.filter { records[$0] == nil }.map { .removed($0) }
+        changes += order.compactMap { key in old.records[key] == nil ? records[key].map { .added($0) } : nil }
+        changes += order.compactMap { key in
+            old.records[key] != nil && modified.contains(key) ? records[key].map { .updated($0) } : nil
+        }
+        let expectedOrder = old.order.filter { records[$0] != nil } + order.filter { old.records[$0] == nil }
+        if expectedOrder != order {
+            changes.append(.reordered(order))
+        }
+        return (changes, invalidated)
     }
 
     private mutating func invalidate(_ key: Key) {

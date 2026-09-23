@@ -86,10 +86,3 @@ public struct StorePolicy: Sendable {
         StorePolicy(duplicates: .returnExisting, ordering: .mostRecentlyUsed, limit: limit)
     }
 }
-
-/// A change to a store's records.
-public enum StoreChange<Key: Hashable & Sendable>: Sendable, Hashable {
-    case added(Key)
-    case updated(Key)
-    case removed(Key)
-}
