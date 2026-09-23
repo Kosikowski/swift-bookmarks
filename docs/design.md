@@ -399,7 +399,7 @@ The answers feed back into `Grant` intake and the fake engine, so unit tests sta
 
 Where the code differs from the sketches above:
 
-- **Engine:** `BookmarkEngine` takes Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. It also inspects items (`itemInfo(at:)`, `fileIdentity(of:)`, `itemExists(atPath:)`) and reads and writes alias files, so every file system call goes through one seam. Engines must not call back into the library, because starts and stops run under its locks.
+- **Engine:** the seam is three protocols. `BookmarkEngine` creates and resolves bytes and starts and stops scopes, taking Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. `ItemInspecting` answers `itemInfo(at:)`, `fileIdentity(of:)` and `itemExists(atPath:)`, and `AliasFileAccessing` reads and writes alias files. `BookmarkService` takes their composition, `FileSystemEngine`; the registry and scopes need only `BookmarkEngine`, and validation only `ItemInspecting`. Engines must not call back into the library, because starts and stops run under its locks.
 - **Default kind:** `BookmarkKind.persistentDefault(for:)` takes the environment; the static property uses the current process.
 - **Failures:** `BookmarkFailure` also has `.refused(GrantRefusal)` for validator refusals and `.cancelled` for callers that stop waiting.
 - **Validators** run inside `BookmarkService.adopt` and `create`, while access to the item is held, through `validators:` and `context:` parameters. They inspect items through `BookmarkEngine.itemInfo(at:)`. `.notTooBroad` refuses every top-level folder, other users' homes and second-level system folders as well as the home folder and its ancestors.

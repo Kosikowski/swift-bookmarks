@@ -1,7 +1,7 @@
 public import Foundation
 
 /// The ``BookmarkEngine`` backed by Foundation's URL bookmark APIs.
-public struct SystemBookmarkEngine: BookmarkEngine {
+public struct SystemBookmarkEngine: FileSystemEngine {
     public let environment: SandboxEnvironment
 
     /// Creates an engine for the current process.

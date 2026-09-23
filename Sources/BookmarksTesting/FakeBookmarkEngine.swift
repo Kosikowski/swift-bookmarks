@@ -9,7 +9,7 @@ import Synchronization
 /// volumes can be unmounted. In a sandboxed environment, creating a bookmark requires
 /// access to the item, as the real system does, and every start and stop is counted per path
 /// so tests can assert that access is balanced.
-public final class FakeBookmarkEngine: BookmarkEngine, Sendable {
+public final class FakeBookmarkEngine: FileSystemEngine {
     public let environment: SandboxEnvironment
 
     private let state = Mutex(FakeFileSystem())

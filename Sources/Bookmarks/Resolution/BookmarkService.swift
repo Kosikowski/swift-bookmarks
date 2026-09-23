@@ -8,7 +8,7 @@ import os
 /// caller's thread. Document-scoped bookmarks go through ``DocumentBookmarks``.
 public struct BookmarkService: Sendable {
     /// The engine that talks to the system.
-    public let engine: any BookmarkEngine
+    public let engine: any FileSystemEngine
     /// The executor that runs blocking system calls.
     public let executor: BlockingExecutor
     /// How long to wait for a single system call. `nil` waits indefinitely.
@@ -16,7 +16,7 @@ public struct BookmarkService: Sendable {
 
     /// Creates a bookmark service.
     public init(
-        engine: any BookmarkEngine = SystemBookmarkEngine(),
+        engine: any FileSystemEngine = SystemBookmarkEngine(),
         executor: BlockingExecutor = .shared,
         timeout: Duration? = nil
     ) {
@@ -143,8 +143,8 @@ extension BookmarkService {
             self.context = context
         }
 
-        func check(_ url: URL, engine: any BookmarkEngine) throws(BookmarkError) {
-            guard let info = engine.itemInfo(at: url) else {
+        func check(_ url: URL, inspector: any ItemInspecting) throws(BookmarkError) {
+            guard let info = inspector.itemInfo(at: url) else {
                 throw BookmarkError(.refused(.uninspectable(path: url.path(percentEncoded: false))))
             }
             for validator in validators {
@@ -297,7 +297,7 @@ extension BookmarkService {
                     engine.stopAccessing(grant.url)
                 }
             }
-            try validation?.check(grant.url, engine: engine)
+            try validation?.check(grant.url, inspector: engine)
             do {
                 let data = try engine.makeBookmark(
                     for: grant.url,

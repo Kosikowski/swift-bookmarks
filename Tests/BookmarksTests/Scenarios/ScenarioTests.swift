@@ -215,7 +215,7 @@ struct AliasFilesTests {
     }
 }
 
-private struct RejectingAliasEngine: BookmarkEngine {
+private struct RejectingAliasEngine: FileSystemEngine {
     let base: FakeBookmarkEngine
     var environment: SandboxEnvironment { base.environment }
 

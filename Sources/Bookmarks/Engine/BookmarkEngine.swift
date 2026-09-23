@@ -1,8 +1,9 @@
 public import Foundation
 
-/// The only boundary between the library and the operating system.
+/// Creates and resolves bookmark bytes and starts and stops security-scoped access.
 ///
-/// Every call is synchronous and may block, so the library always calls an engine through a
+/// Engines are the only boundary between the library and the operating system. Every call is
+/// synchronous and may block, so the library always calls an engine through a
 /// ``BlockingExecutor``. Implementations must be safe to call from any thread and must not call
 /// back into the library: starts and stops run while the library holds its locks.
 /// ``SystemBookmarkEngine`` is the real implementation; `BookmarksTesting` provides a fake.
@@ -33,7 +34,10 @@ public protocol BookmarkEngine: Sendable {
 
     /// Balances one successful ``startAccessing(_:)``.
     func stopAccessing(_ url: URL)
+}
 
+/// Inspects items on disk, for validation, failure classification and duplicate detection.
+public protocol ItemInspecting: Sendable {
     /// Whether an item exists at `path`.
     func itemExists(atPath path: String) -> Bool
 
@@ -42,10 +46,16 @@ public protocol BookmarkEngine: Sendable {
 
     /// Describes the item at `url`, or `nil` when it can't be inspected.
     func itemInfo(at url: URL) -> ItemInfo?
+}
 
+/// Reads and writes Finder alias files.
+public protocol AliasFileAccessing: Sendable {
     /// Writes alias-file bookmark bytes to `url`.
     func writeAliasFile(_ data: BookmarkData, to url: URL) throws
 
     /// Reads the bookmark bytes stored in the alias file at `url`.
     func aliasFileData(at url: URL) throws -> BookmarkData
 }
+
+/// Everything ``BookmarkService`` needs from the system.
+public typealias FileSystemEngine = BookmarkEngine & ItemInspecting & AliasFileAccessing
