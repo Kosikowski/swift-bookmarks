@@ -44,7 +44,9 @@ public struct Bookmarks: Sendable {
         for grant: Grant,
         kind: BookmarkKind? = nil,
         relativeTo document: URL? = nil,
-        includingResourceValuesFor keys: Set<URLResourceKey> = []
+        includingResourceValuesFor keys: Set<URLResourceKey> = [],
+        validators: [any GrantValidator] = [],
+        context: ValidationContext = ValidationContext()
     ) async throws(BookmarkError) -> BookmarkData {
         let kind = kind ?? defaultKind
         try checkSupported(kind, document: document)
@@ -59,7 +61,8 @@ public struct Bookmarks: Sendable {
                 keys: keys,
                 engine: engine,
                 classifier: classifier,
-                platform: platform
+                platform: platform,
+                validation: validators.isEmpty ? nil : Validation(validators: validators, context: context)
             ).data
         }
     }
