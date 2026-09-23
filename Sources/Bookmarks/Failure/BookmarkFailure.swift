@@ -51,3 +51,20 @@ public enum BookmarkFailure: Sendable, Hashable, Codable {
         recommendation == .retryLater
     }
 }
+
+extension BookmarkFailure {
+    var caseName: String {
+        switch self {
+        case .missing: "missing"
+        case .volumeUnavailable: "volumeUnavailable"
+        case .needsRegrant: "needsRegrant"
+        case .denied: "denied"
+        case .corrupt: "corrupt"
+        case .refused: "refused"
+        case .unsupported: "unsupported"
+        case .timedOut: "timedOut"
+        case .cancelled: "cancelled"
+        case .other: "other"
+        }
+    }
+}

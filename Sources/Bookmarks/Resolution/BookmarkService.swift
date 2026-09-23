@@ -5,8 +5,8 @@ import os
 ///
 /// Use it directly when your own format stores the bookmark bytes, and through
 /// ``BookmarkStore`` otherwise. All system calls run on a ``BlockingExecutor``, never on the
-/// caller's thread.
-public struct Bookmarks: Sendable {
+/// caller's thread. Document-scoped bookmarks go through ``DocumentBookmarks``.
+public struct BookmarkService: Sendable {
     /// The engine that talks to the system.
     public let engine: any BookmarkEngine
     /// The executor that runs blocking system calls.
@@ -35,91 +35,48 @@ public struct Bookmarks: Sendable {
     ///
     /// Access is started around creation when the grant's origin needs it. The caller keeps
     /// responsibility for any access the system started; see ``relinquish(_:)``. Prefer
-    /// ``adopt(_:kind:relativeTo:includingResourceValuesFor:)``, which also resolves the new
-    /// bookmark and balances the grant.
+    /// ``adopt(_:kind:includingResourceValuesFor:validators:context:)``, which also resolves
+    /// the new bookmark and balances the grant.
     ///
     /// Save-panel URLs point at files that may not exist yet. Write the file before creating
     /// a bookmark to it, or the call fails with ``BookmarkFailure/missing``.
     public func create(
         for grant: Grant,
         kind: BookmarkKind? = nil,
-        relativeTo document: URL? = nil,
         includingResourceValuesFor keys: Set<URLResourceKey> = [],
         validators: [any GrantValidator] = [],
         context: ValidationContext = ValidationContext()
     ) async throws(BookmarkError) -> BookmarkData {
-        let kind = kind ?? defaultKind
-        try checkSupported(kind, document: document)
-        let engine = engine
-        let classifier = classifier
-        let platform = environment.platform
-        return try await run { () throws(BookmarkError) -> BookmarkData in
-            try Self.createNow(
-                grant: grant,
-                kind: kind,
-                document: document,
-                keys: keys,
-                engine: engine,
-                classifier: classifier,
-                platform: platform,
-                validation: validators.isEmpty ? nil : Validation(validators: validators, context: context)
-            ).data
-        }
+        try await create(
+            for: grant,
+            kind: kind ?? defaultKind,
+            document: nil,
+            keys: keys,
+            validation: Validation(validators: validators, context: context)
+        )
     }
 
     /// Creates a bookmark for a granted URL, balances the grant, and resolves the new bookmark.
     ///
     /// This is the recommended way to take in a URL from a panel, importer, picker or drop:
     /// from then on, only the resolved bookmark is used. The grant is relinquished whether or
-    /// not adoption succeeds.
+    /// not adoption succeeds, so write a save-panel file before adopting its grant.
     ///
     /// Validators run while access to the item is held, before the bookmark is created. A
     /// refusal fails with ``BookmarkFailure/refused(_:)``.
     public func adopt(
         _ grant: Grant,
         kind: BookmarkKind? = nil,
-        relativeTo document: URL? = nil,
         includingResourceValuesFor keys: Set<URLResourceKey> = [],
         validators: [any GrantValidator] = [],
         context: ValidationContext = ValidationContext()
     ) async throws(BookmarkError) -> ResolvedBookmark {
-        let kind = kind ?? defaultKind
-        do {
-            try checkSupported(kind, document: document)
-        } catch {
-            relinquish(grant)
-            throw error
-        }
-        let engine = engine
-        let classifier = classifier
-        let platform = environment.platform
-        let created = try await run { () throws(BookmarkError) -> Created in
-            defer {
-                if grant.isStartedBySystem(on: platform) {
-                    engine.stopAccessing(grant.url)
-                }
-            }
-            return try Self.createNow(
-                grant: grant,
-                kind: kind,
-                document: document,
-                keys: keys,
-                engine: engine,
-                classifier: classifier,
-                platform: platform,
-                validation: validators.isEmpty ? nil : Validation(validators: validators, context: context)
-            )
-        }
-        let resolved = try await resolve(created.data, kind: kind, relativeTo: document)
-        return ResolvedBookmark(
-            kind: kind,
-            originalData: created.data,
-            wasStale: false,
-            refreshedData: nil,
-            refreshError: nil,
-            recorded: resolved.recorded,
-            fileIdentity: created.identity,
-            handle: resolved.handle
+        try await adopt(
+            grant,
+            kind: kind ?? defaultKind,
+            document: nil,
+            keys: keys,
+            validation: Validation(validators: validators, context: context)
         )
     }
 
@@ -138,11 +95,6 @@ public struct Bookmarks: Sendable {
         grants.forEach(relinquish)
     }
 
-    func consuming<T>(_ grant: Grant, _ body: () async throws(BookmarkError) -> T) async throws(BookmarkError) -> T {
-        defer { relinquish(grant) }
-        return try await body()
-    }
-
     /// Resolves bookmark bytes and refreshes them when they are stale.
     ///
     /// Refreshing happens inside the item's scope, as the system requires. A failed refresh
@@ -150,49 +102,15 @@ public struct Bookmarks: Sendable {
     public func resolve(
         _ data: BookmarkData,
         kind: BookmarkKind? = nil,
-        relativeTo document: URL? = nil,
         policy: ResolutionPolicy = .default
     ) async throws(BookmarkError) -> ResolvedBookmark {
-        let kind = kind ?? defaultKind
-        try checkSupported(kind, document: document)
-        let engine = engine
-        let classifier = classifier
-        return try await run { () throws(BookmarkError) -> ResolvedBookmark in
-            try Self.resolveNow(
-                data,
-                kind: kind,
-                document: document,
-                policy: policy,
-                engine: engine,
-                classifier: classifier
-            )
-        }
+        try await resolve(data, kind: kind ?? defaultKind, document: nil, policy: policy)
     }
 
     /// Checks whether the bookmark's target is reachable, without mounting volumes, showing UI
     /// or starting access.
-    public func availability(
-        of data: BookmarkData,
-        kind: BookmarkKind? = nil,
-        relativeTo document: URL? = nil
-    ) async -> Availability {
-        let kind = kind ?? defaultKind
-        do {
-            try checkSupported(kind, document: document)
-            let engine = engine
-            let classifier = classifier
-            return try await run { () throws(BookmarkError) -> Availability in
-                let recorded = engine.recordedValues(in: data)
-                do {
-                    _ = try engine.resolve(data, options: kind.resolutionOptions(.default), relativeTo: document)
-                    return .available
-                } catch {
-                    return Availability(classifier.classify(error, recorded: recorded))
-                }
-            }
-        } catch {
-            return Availability(error.failure)
-        }
+    public func availability(of data: BookmarkData, kind: BookmarkKind? = nil) async -> Availability {
+        await availability(of: data, kind: kind ?? defaultKind, document: nil)
     }
 
     /// What the bookmark recorded about its target. Doesn't touch the file system.
@@ -202,26 +120,28 @@ public struct Bookmarks: Sendable {
 
     /// Resolves the bookmark, holds access while `body` runs, and ends it afterwards.
     ///
-    /// Refreshed bytes aren't reported. Use ``resolve(_:kind:relativeTo:policy:)`` when the
-    /// caller persists the bookmark and should replace stale bytes.
+    /// Refreshed bytes aren't reported. Use ``resolve(_:kind:policy:)`` when the caller
+    /// persists the bookmark and should replace stale bytes.
     nonisolated(nonsending) public func withAccess<T>(
         to data: BookmarkData,
         kind: BookmarkKind? = nil,
-        relativeTo document: URL? = nil,
         policy: ResolutionPolicy = .default,
         _ body: (URL) async throws -> T
     ) async throws -> T {
-        let resolved = try await resolve(data, kind: kind, relativeTo: document, policy: policy)
-        let lease = resolved.beginAccess()
-        defer { lease.end() }
-        return try await body(lease.url)
+        try await withAccess(to: data, kind: kind ?? defaultKind, document: nil, policy: policy, body)
     }
 }
 
-extension Bookmarks {
+extension BookmarkService {
     struct Validation: Sendable {
         let validators: [any GrantValidator]
         let context: ValidationContext
+
+        init?(validators: [any GrantValidator], context: ValidationContext) {
+            guard !validators.isEmpty else { return nil }
+            self.validators = validators
+            self.context = context
+        }
 
         func check(_ url: URL, engine: any BookmarkEngine) throws(BookmarkError) {
             guard let info = engine.itemInfo(at: url) else {
@@ -245,6 +165,99 @@ extension Bookmarks {
         return FailureClassifier { engine.itemExists(atPath: $0) }
     }
 
+    func create(
+        for grant: Grant,
+        kind: BookmarkKind,
+        document: URL?,
+        keys: Set<URLResourceKey>,
+        validation: Validation?
+    ) async throws(BookmarkError) -> BookmarkData {
+        try checkSupported(kind, document: document)
+        return try await createNow(grant, kind: kind, document: document, keys: keys, validation: validation).data
+    }
+
+    func adopt(
+        _ grant: Grant,
+        kind: BookmarkKind,
+        document: URL?,
+        keys: Set<URLResourceKey>,
+        validation: Validation?
+    ) async throws(BookmarkError) -> ResolvedBookmark {
+        let created = try await consuming(grant) { () throws(BookmarkError) -> Created in
+            try checkSupported(kind, document: document)
+            return try await createNow(grant, kind: kind, document: document, keys: keys, validation: validation)
+        }
+        let resolved = try await resolve(created.data, kind: kind, document: document, policy: .default)
+        return ResolvedBookmark(
+            kind: kind,
+            originalData: created.data,
+            wasStale: false,
+            refreshedData: nil,
+            refreshError: nil,
+            recorded: resolved.recorded,
+            fileIdentity: created.identity,
+            handle: resolved.handle
+        )
+    }
+
+    func resolve(
+        _ data: BookmarkData,
+        kind: BookmarkKind,
+        document: URL?,
+        policy: ResolutionPolicy
+    ) async throws(BookmarkError) -> ResolvedBookmark {
+        try checkSupported(kind, document: document)
+        let engine = engine
+        let classifier = classifier
+        return try await run { () throws(BookmarkError) -> ResolvedBookmark in
+            try Self.resolveNow(
+                data,
+                kind: kind,
+                document: document,
+                policy: policy,
+                engine: engine,
+                classifier: classifier
+            )
+        }
+    }
+
+    func availability(of data: BookmarkData, kind: BookmarkKind, document: URL?) async -> Availability {
+        do {
+            try checkSupported(kind, document: document)
+            let engine = engine
+            let classifier = classifier
+            return try await run { () throws(BookmarkError) -> Availability in
+                let recorded = engine.recordedValues(in: data)
+                do {
+                    _ = try engine.resolve(data, options: kind.resolutionOptions(.default), relativeTo: document)
+                    return .available
+                } catch {
+                    return Availability(classifier.classify(error, recorded: recorded))
+                }
+            }
+        } catch {
+            return Availability(error.failure)
+        }
+    }
+
+    nonisolated(nonsending) func withAccess<T>(
+        to data: BookmarkData,
+        kind: BookmarkKind,
+        document: URL?,
+        policy: ResolutionPolicy,
+        _ body: (URL) async throws -> T
+    ) async throws -> T {
+        let resolved = try await resolve(data, kind: kind, document: document, policy: policy)
+        let lease = resolved.beginAccess()
+        defer { lease.end() }
+        return try await body(lease.url)
+    }
+
+    func consuming<T>(_ grant: Grant, _ body: () async throws(BookmarkError) -> T) async throws(BookmarkError) -> T {
+        defer { relinquish(grant) }
+        return try await body()
+    }
+
     func checkSupported(_ kind: BookmarkKind, document: URL?) throws(BookmarkError) {
         if let reason = kind.unsupportedReason(in: environment, relativeTo: document) {
             throw BookmarkError(.unsupported(reason: reason))
@@ -266,35 +279,37 @@ extension Bookmarks {
         }
     }
 
-    static func createNow(
-        grant: Grant,
+    private func createNow(
+        _ grant: Grant,
         kind: BookmarkKind,
         document: URL?,
         keys: Set<URLResourceKey>,
-        engine: any BookmarkEngine,
-        classifier: FailureClassifier,
-        platform: SandboxEnvironment.Platform,
-        validation: Validation? = nil
-    ) throws(BookmarkError) -> Created {
-        let needsStart = !grant.isStartedBySystem(on: platform) && grant.origin != .alreadyAccessible
-        let started = needsStart && engine.startAccessing(grant.url)
-        defer {
-            if started {
-                engine.stopAccessing(grant.url)
+        validation: Validation?
+    ) async throws(BookmarkError) -> Created {
+        let engine = engine
+        let classifier = classifier
+        let platform = environment.platform
+        return try await run { () throws(BookmarkError) -> Created in
+            let needsStart = !grant.isStartedBySystem(on: platform) && grant.origin != .alreadyAccessible
+            let started = needsStart && engine.startAccessing(grant.url)
+            defer {
+                if started {
+                    engine.stopAccessing(grant.url)
+                }
             }
-        }
-        try validation?.check(grant.url, engine: engine)
-        do {
-            let data = try engine.makeBookmark(
-                for: grant.url,
-                options: kind.creationOptions,
-                includingResourceValuesFor: keys,
-                relativeTo: document
-            )
-            return Created(data: data, identity: engine.fileIdentity(of: grant.url))
-        } catch {
-            let failure = classifier.classify(error, recorded: nil)
-            throw BookmarkError(failure, lastKnownPath: grant.url.path(percentEncoded: false), underlying: error as NSError)
+            try validation?.check(grant.url, engine: engine)
+            do {
+                let data = try engine.makeBookmark(
+                    for: grant.url,
+                    options: kind.creationOptions,
+                    includingResourceValuesFor: keys,
+                    relativeTo: document
+                )
+                return Created(data: data, identity: engine.fileIdentity(of: grant.url))
+            } catch {
+                let failure = classifier.classify(error, recorded: nil)
+                throw BookmarkError(failure, lastKnownPath: grant.url.path(percentEncoded: false), underlying: error as NSError)
+            }
         }
     }
 
@@ -312,7 +327,7 @@ extension Bookmarks {
             resolution = try engine.resolve(data, options: kind.resolutionOptions(policy), relativeTo: document)
         } catch {
             let failure = classifier.classify(error, recorded: recorded)
-            Log.resolution.debug("Resolution failed: \(String(describing: failure), privacy: .public)")
+            Log.resolution.debug("Resolution failed: \(failure.caseName, privacy: .public)")
             throw BookmarkError(failure, lastKnownPath: recorded?.path, underlying: error as NSError)
         }
 
@@ -369,7 +384,7 @@ extension Bookmarks {
             )
         } catch {
             let failure = classifier.classify(error, recorded: nil)
-            Log.resolution.error("Refreshing a stale bookmark failed: \(String(describing: failure), privacy: .public)")
+            Log.resolution.error("Refreshing a stale bookmark failed: \(failure.caseName, privacy: .public)")
             throw BookmarkError(failure, lastKnownPath: url.path(percentEncoded: false), underlying: error as NSError)
         }
     }

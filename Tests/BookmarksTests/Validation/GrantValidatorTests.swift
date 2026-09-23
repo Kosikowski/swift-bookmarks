@@ -128,13 +128,13 @@ struct GrantValidatorTests {
     @Suite("During adoption")
     struct DuringAdoption {
         let engine = Fixtures.engine()
-        var bookmarks: Bookmarks { Fixtures.bookmarks(engine) }
+        var service: BookmarkService { Fixtures.service(engine) }
 
         @Test func runWhileAccessIsHeldAndRefuseBeforeCreating() async {
             engine.addItem(at: "/Users/me/file.txt", isDirectory: false)
 
             let error = await #expect(throws: BookmarkError.self) {
-                try await bookmarks.adopt(engine.grant("/Users/me/file.txt", origin: .fileImporter), validators: [.directoryOnly])
+                try await service.adopt(engine.grant("/Users/me/file.txt", origin: .fileImporter), validators: [.directoryOnly])
             }
 
             #expect(error?.failure == .refused(.notDirectory(path: "/Users/me/file.txt")))
@@ -149,7 +149,7 @@ struct GrantValidatorTests {
             engine.addSymbolicLink(at: "/Users/me/Link", pointingTo: "/Users/me/Real")
 
             let error = await #expect(throws: BookmarkError.self) {
-                try await bookmarks.adopt(
+                try await service.adopt(
                     engine.grant("/Users/me/Link", origin: .openPanel),
                     validators: [.noOverlap],
                     context: ValidationContext(existingPaths: ["/Users/me/Real"])
@@ -165,7 +165,7 @@ struct GrantValidatorTests {
             engine.addSymbolicLink(at: "/Users/me/Link", pointingTo: "/Users/me/Real")
 
             let error = await #expect(throws: BookmarkError.self) {
-                try await bookmarks.adopt(engine.grant("/Users/me/Link", origin: .drop), validators: [.noSymbolicLink])
+                try await service.adopt(engine.grant("/Users/me/Link", origin: .appKitDrop), validators: [.noSymbolicLink])
             }
 
             #expect(error?.failure == .refused(.symbolicLink(path: "/Users/me/Link")))
@@ -173,7 +173,7 @@ struct GrantValidatorTests {
 
         @Test func uninspectableItemsAreRefused() async {
             let error = await #expect(throws: BookmarkError.self) {
-                try await bookmarks.adopt(engine.grant("/Users/me/Missing", origin: .openPanel), validators: [.directoryOnly])
+                try await service.adopt(engine.grant("/Users/me/Missing", origin: .openPanel), validators: [.directoryOnly])
             }
 
             #expect(error?.failure == .refused(.uninspectable(path: "/Users/me/Missing")))
@@ -183,7 +183,7 @@ struct GrantValidatorTests {
         @Test func acceptedItemsAreAdopted() async throws {
             engine.addItem(at: "/Users/me/Folder")
 
-            let resolved = try await bookmarks.adopt(engine.grant("/Users/me/Folder", origin: .openPanel), validators: [.directoryOnly, .noSymbolicLink])
+            let resolved = try await service.adopt(engine.grant("/Users/me/Folder", origin: .openPanel), validators: [.directoryOnly, .noSymbolicLink])
 
             #expect(resolved.displayPath == "/Users/me/Folder/")
         }

@@ -46,7 +46,7 @@ public struct SystemBookmarkEngine: BookmarkEngine {
         let recorded = RecordedValues(
             path: values.path,
             name: values.name,
-            volumePath: values.volume?.path(percentEncoded: false).trimmingTrailingSlash,
+            volumePath: values.volume.map { NormalizedPath($0).string },
             volumeName: values.volumeName,
             isDirectory: values.isDirectory
         )
@@ -82,7 +82,7 @@ public struct SystemBookmarkEngine: BookmarkEngine {
         return ItemInfo(
             isDirectory: values.isDirectory ?? false,
             isSymbolicLink: values.isSymbolicLink ?? false,
-            canonicalPath: url.resolvingSymlinksInPath().path(percentEncoded: false).trimmingTrailingSlash
+            canonicalPath: NormalizedPath(url.resolvingSymlinksInPath()).string
         )
     }
 
@@ -100,11 +100,5 @@ extension URL {
         var url = self
         url.removeAllCachedResourceValues()
         return try url.resourceValues(forKeys: keys)
-    }
-}
-
-extension String {
-    var trimmingTrailingSlash: String {
-        count > 1 && hasSuffix("/") ? String(dropLast()) : self
     }
 }

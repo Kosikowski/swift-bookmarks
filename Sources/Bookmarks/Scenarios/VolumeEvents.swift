@@ -48,6 +48,8 @@ public enum VolumeEvents {
     }
 }
 
+// Unchecked because observer tokens aren't Sendable; they're immutable after init and only
+// passed back to NotificationCenter, which is thread-safe.
 private final class ObserverTokens: @unchecked Sendable {
     private let tokens: [any NSObjectProtocol]
     private let center: NotificationCenter

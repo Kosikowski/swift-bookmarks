@@ -59,14 +59,6 @@ public struct PersistenceError: Error, Sendable, CustomStringConvertible {
         self.underlying = underlying
     }
 
-    init(wrapping error: any Error, as reason: Reason) {
-        if let error = error as? PersistenceError {
-            self = error
-        } else {
-            self.init(reason, underlying: error as NSError)
-        }
-    }
-
     public var description: String {
         "PersistenceError(\(reason)\(underlying.map { ", underlying: \($0)" } ?? ""))"
     }

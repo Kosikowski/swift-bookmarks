@@ -33,7 +33,7 @@ final class ProbeModel {
     func saveForLater() async {
         guard let grant = await OpenPanelPicker.choose(.folder(message: "Pick a folder, then delete it or eject its volume")).first else { return }
         do {
-            savedBookmark = try await probes.bookmarks.adopt(grant, kind: .appScoped(.readWrite)).data
+            savedBookmark = try await probes.service.adopt(grant, kind: .appScoped(.readWrite)).data
             record([ProbeResult(probe: "Resolution", detail: "Saved a bookmark to \(grant.url.path(percentEncoded: false))")])
         } catch {
             record([ProbeResult(probe: "Resolution", detail: "Saving failed: \(error)")])

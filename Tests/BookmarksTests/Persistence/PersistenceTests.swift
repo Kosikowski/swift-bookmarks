@@ -294,7 +294,7 @@ struct JSONFilePersistenceTests {
         try persistence().save(records)
 
         let store = TestStore(persistence: persistence())
-        try store.updateMetadata("a") { $0.name = "Renamed" }
+        try await store.updateMetadata("a") { $0.name = "Renamed" }
 
         #expect(try persistence().load().first?.metadata.name == "Renamed")
     }
@@ -302,6 +302,13 @@ struct JSONFilePersistenceTests {
 
 @Suite("MigratingPersistence")
 struct MigratingPersistenceTests {
+    final class Flag: Sendable {
+        private let value = Atomic(false)
+        var isSet: Bool { value.load(ordering: .relaxed) }
+        func set() { value.store(true, ordering: .relaxed) }
+        var marker: MigrationMarker { MigrationMarker(isComplete: { self.isSet }, markComplete: { self.set() }) }
+    }
+
     final class CleanUpCounter: Sendable {
         private let count = Mutex(0)
         func increment() { count.withLock { $0 += 1 } }
@@ -311,58 +318,120 @@ struct MigratingPersistenceTests {
     @Test func importsLegacyRecordsOnceAndThenCleansUp() throws {
         let base = InMemoryPersistence<String, Tag>()
         let counter = CleanUpCounter()
-        let migrating = MigratingPersistence(base: base, legacy: { sampleRecords() }, cleanUp: { counter.increment() })
+        let flag = Flag()
+        let migrating = MigratingPersistence(base: base, marker: flag.marker, legacy: { sampleRecords() }, cleanUp: { counter.increment() })
 
         #expect(try migrating.load() == sampleRecords())
         #expect(base.storedRecords == sampleRecords())
         #expect(counter.value == 1)
+        #expect(flag.isSet)
 
         #expect(try migrating.load() == sampleRecords())
         #expect(counter.value == 1)
     }
 
-    @Test func prefersExistingRecords() throws {
-        let base = InMemoryPersistence(records: [sampleRecords()[1]])
-        let migrating = MigratingPersistence(base: base, legacy: { sampleRecords() })
+    @Test func completedMigrationsDoNotResurrectDeletedRecords() throws {
+        let flag = Flag()
+        let migrating = MigratingPersistence(base: InMemoryPersistence<String, Tag>(), marker: flag.marker, legacy: { sampleRecords() })
+
+        #expect(try migrating.load() == sampleRecords())
+        try migrating.save([])
+
+        #expect(try migrating.load().isEmpty)
+    }
+
+    @Test func existingRecordsMarkTheMigrationComplete() throws {
+        let flag = Flag()
+        let counter = CleanUpCounter()
+        let migrating = MigratingPersistence(
+            base: InMemoryPersistence(records: [sampleRecords()[1]]),
+            marker: flag.marker,
+            legacy: { sampleRecords() },
+            cleanUp: { counter.increment() }
+        )
 
         #expect(try migrating.load() == [sampleRecords()[1]])
+        #expect(flag.isSet)
+        #expect(counter.value == 0)
     }
 
     @Test(arguments: [nil, [TestRecord]()])
-    func nothingToImport(_ legacy: [TestRecord]?) throws {
+    func nothingToImportMarksCompletion(_ legacy: [TestRecord]?) throws {
         let counter = CleanUpCounter()
-        let migrating = MigratingPersistence(base: InMemoryPersistence<String, Tag>(), legacy: { legacy }, cleanUp: { counter.increment() })
+        let flag = Flag()
+        let migrating = MigratingPersistence(base: InMemoryPersistence<String, Tag>(), marker: flag.marker, legacy: { legacy }, cleanUp: { counter.increment() })
 
         #expect(try migrating.load().isEmpty)
         #expect(counter.value == 0)
+        #expect(flag.isSet)
     }
 
     @Test func keepsLegacyDataWhenSavingTheImportFails() {
         let base = ScriptedPersistence<String, Tag>()
         base.failSaves(1)
         let counter = CleanUpCounter()
-        let migrating = MigratingPersistence(base: base, legacy: { sampleRecords() }, cleanUp: { counter.increment() })
+        let flag = Flag()
+        let migrating = MigratingPersistence(base: base, marker: flag.marker, legacy: { sampleRecords() }, cleanUp: { counter.increment() })
 
         #expect(throws: PersistenceError.self) { try migrating.load() }
         #expect(counter.value == 0)
+        #expect(!flag.isSet)
     }
 
-    @Test func propagatesLegacyReadFailures() {
+    @Test func failedLegacyReadsLeaveTheMarkerUnset() {
+        let flag = Flag()
         let migrating = MigratingPersistence(
             base: InMemoryPersistence<String, Tag>(),
+            marker: flag.marker,
             legacy: { () throws(PersistenceError) -> [TestRecord]? in throw PersistenceError(.readFailed) }
         )
 
         #expect(throws: PersistenceError.self) { try migrating.load() }
+        #expect(!flag.isSet)
+    }
+
+    @Test func markersCanRelyOnTheCleanUpAlone() throws {
+        let remains = Atomic(true)
+        let migrating = MigratingPersistence(
+            base: InMemoryPersistence<String, Tag>(),
+            marker: MigrationMarker(isComplete: { !remains.load(ordering: .relaxed) }, markComplete: {}),
+            legacy: { sampleRecords() },
+            cleanUp: { remains.store(false, ordering: .relaxed) }
+        )
+
+        #expect(try migrating.load() == sampleRecords())
+        try migrating.save([])
+
+        #expect(try migrating.load().isEmpty)
     }
 
     @Test func savesGoToTheBase() throws {
         let base = InMemoryPersistence<String, Tag>()
-        let migrating = MigratingPersistence(base: base, legacy: { nil })
+        let migrating = MigratingPersistence(base: base, marker: Flag().marker, legacy: { nil })
 
         try migrating.save(sampleRecords())
 
         #expect(base.storedRecords == sampleRecords())
+    }
+
+    @Test func userDefaultsMarkerPersistsCompletion() {
+        let suite = "swift-bookmarks.tests.\(UUID().uuidString)"
+        defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+        let marker = MigrationMarker.userDefaults(key: "migrated", suiteName: suite)
+
+        #expect(!marker.isComplete)
+        marker.markComplete()
+
+        #expect(MigrationMarker.userDefaults(key: "migrated", suiteName: suite).isComplete)
+    }
+
+    @Test func standardDefaultsMarker() {
+        let key = "swift-bookmarks.tests.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removeObject(forKey: key) }
+
+        MigrationMarker.userDefaults(key: key).markComplete()
+
+        #expect(UserDefaults.standard.bool(forKey: key))
     }
 }
 
@@ -394,11 +463,5 @@ struct StoreErrorTests {
         }
     }
 
-    @Test func wrappingKeepsPersistenceErrors() {
-        let original = PersistenceError(.unreadable)
-
-        #expect(PersistenceError(wrapping: original, as: .writeFailed).reason == .unreadable)
-        #expect(PersistenceError(wrapping: CocoaError(.fileWriteNoPermission), as: .writeFailed).reason == .writeFailed)
-    }
 }
 

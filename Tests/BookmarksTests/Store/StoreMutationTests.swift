@@ -15,15 +15,15 @@ struct StoreMutationTests {
             try await harness.add("a", "/Users/me/A")
             let changes = harness.store.changes()
 
-            #expect(try harness.store.forget("a"))
+            #expect(try await harness.store.forget("a"))
 
             #expect(try harness.store.records().isEmpty)
             #expect(harness.saved.isEmpty)
             #expect(await collect(changes, count: 1) == [.removed("a")])
         }
 
-        @Test func forgettingAnUnknownKeyChangesNothing() throws {
-            #expect(try !harness.store.forget("nope"))
+        @Test func forgettingAnUnknownKeyChangesNothing() async throws {
+            #expect(try await !harness.store.forget("nope"))
             #expect(harness.persistence.base.saveCount == 0)
         }
 
@@ -31,7 +31,7 @@ struct StoreMutationTests {
             try await harness.add("a", "/Users/me/A")
             let lease = try await harness.store.lease("a")
 
-            try harness.store.forget("a")
+            try await harness.store.forget("a")
 
             #expect(lease.isActive)
             #expect(harness.store.activeLease(for: "a") == nil)
@@ -45,7 +45,7 @@ struct StoreMutationTests {
             try await harness.add("b", "/Users/me/B")
             let changes = harness.store.changes()
 
-            try harness.store.removeAll()
+            try await harness.store.removeAll()
 
             #expect(try harness.store.records().isEmpty)
             #expect(Set(await collect(changes, count: 2)) == [.removed("a"), .removed("b")])
@@ -149,15 +149,15 @@ struct StoreMutationTests {
         @Test func updatesMetadata() async throws {
             try await harness.add("a", "/Users/me/A", name: "Old")
 
-            try harness.store.updateMetadata("a") { $0.name = "New" }
+            try await harness.store.updateMetadata("a") { $0.name = "New" }
 
             #expect(try harness.store.record("a")?.metadata.name == "New")
             #expect(harness.saved.first?.metadata.name == "New")
         }
 
-        @Test func updatingUnknownKeysFails() {
-            #expect(throws: TestStore.Failure.self) {
-                try harness.store.updateMetadata("nope") { $0.name = "x" }
+        @Test func updatingUnknownKeysFails() async {
+            await #expect(throws: TestStore.Failure.self) {
+                try await harness.store.updateMetadata("nope") { $0.name = "x" }
             }
         }
 
@@ -166,19 +166,19 @@ struct StoreMutationTests {
             try await harness.add("b", "/B")
             try await harness.add("c", "/C")
 
-            try harness.store.move("c", to: 0)
+            try await harness.store.move("c", to: 0)
             #expect(try harness.store.keys() == ["c", "a", "b"])
 
-            try harness.store.move("c", to: 99)
+            try await harness.store.move("c", to: 99)
             #expect(try harness.store.keys() == ["a", "b", "c"])
 
-            try harness.store.move("b", to: -5)
+            try await harness.store.move("b", to: -5)
             #expect(try harness.store.keys() == ["b", "a", "c"])
             #expect(harness.saved.map(\.key) == ["b", "a", "c"])
         }
 
-        @Test func movingUnknownKeysFails() {
-            #expect(throws: TestStore.Failure.self) { try harness.store.move("nope", to: 0) }
+        @Test func movingUnknownKeysFails() async {
+            await #expect(throws: TestStore.Failure.self) { try await harness.store.move("nope", to: 0) }
         }
     }
 
@@ -262,7 +262,7 @@ struct StoreMutationTests {
             _ = try? await harness.store.lease("offline")
 
             try await harness.add("new", "/Users/me/New")
-            try harness.store.forget("new")
+            try await harness.store.forget("new")
 
             #expect(harness.saved.map(\.key) == ["offline"])
             #expect(harness.saved.first?.data == unresolvable.data)

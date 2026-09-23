@@ -32,6 +32,7 @@ public final class BlockingExecutor: Sendable {
         timeout: Duration? = nil,
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
+        try Task.checkCancellation()
         let resumer = OneShot<T>()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -49,6 +50,16 @@ public final class BlockingExecutor: Sendable {
         } onCancel: {
             resumer.resume(with: .failure(CancellationError()))
         }
+    }
+
+    /// Runs `work` and waits for it to finish, even when the caller is cancelled.
+    func perform<T: Sendable, E: Error>(_ work: @escaping @Sendable () throws(E) -> T) async throws(E) -> T {
+        let result = await withCheckedContinuation { (continuation: CheckedContinuation<Result<T, E>, Never>) in
+            queue.addOperation {
+                continuation.resume(returning: Result(catching: work))
+            }
+        }
+        return try result.get()
     }
 }
 

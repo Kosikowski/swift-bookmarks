@@ -39,7 +39,7 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
     public func save(_ records: [BookmarkRecord<Key, Metadata>]) throws(PersistenceError) {
         let data = try PersistedEnvelope<Key, Metadata>.encode(records, pretty: true)
         do {
-            try coordinate(writing: fileURL) { url in
+            try Coordination.write(at: fileURL, options: .forReplacing) { url in
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 if keepsLastGoodCopy, FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
                     try? FileManager.default.removeItem(at: lastGoodURL)
@@ -54,7 +54,7 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
 
     private func read(_ url: URL) throws(PersistenceError) -> Data? {
         do {
-            return try coordinate(reading: url) { url in
+            return try Coordination.read(at: url, options: []) { url -> Data? in
                 guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return nil }
                 return try Data(contentsOf: url)
             }
@@ -81,23 +81,4 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
         return records
     }
 
-    private func coordinate<T>(reading url: URL, _ body: (URL) throws -> T) throws -> T {
-        var coordinationError: NSError?
-        var result: Result<T, any Error>?
-        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { url in
-            result = Result { try body(url) }
-        }
-        if let coordinationError { throw coordinationError }
-        return try result!.get()
-    }
-
-    private func coordinate(writing url: URL, _ body: (URL) throws -> Void) throws {
-        var coordinationError: NSError?
-        var result: Result<Void, any Error>?
-        NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing, error: &coordinationError) { url in
-            result = Result { try body(url) }
-        }
-        if let coordinationError { throw coordinationError }
-        try result!.get()
-    }
 }

@@ -3,29 +3,29 @@ import BookmarksTesting
 import Foundation
 import Testing
 
-@Suite("Bookmarks: availability")
+@Suite("BookmarkService: availability")
 struct AvailabilityCheckTests {
     let engine = Fixtures.engine()
-    var bookmarks: Bookmarks { Fixtures.bookmarks(engine) }
+    var service: BookmarkService { Fixtures.service(engine) }
 
     @Test func availableItems() async throws {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
 
-        #expect(await bookmarks.availability(of: data) == .available)
+        #expect(await service.availability(of: data) == .available)
     }
 
     @Test func staleItemsAreStillAvailable() async throws {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
         engine.moveItem(from: "/Users/me/Folder", to: "/Users/me/Moved")
 
-        #expect(await bookmarks.availability(of: data) == .available)
+        #expect(await service.availability(of: data) == .available)
     }
 
     @Test func missingItems() async throws {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
         engine.removeItem(at: "/Users/me/Folder")
 
-        #expect(await bookmarks.availability(of: data) == .missing)
+        #expect(await service.availability(of: data) == .missing)
     }
 
     @Test func unmountedVolumesAreNotMountedByTheCheck() async throws {
@@ -33,7 +33,7 @@ struct AvailabilityCheckTests {
         let data = try await Fixtures.adoptFolder("/Volumes/Backup/Folder", engine: engine)
         engine.unmountVolume(at: "/Volumes/Backup")
 
-        #expect(await bookmarks.availability(of: data) == .volumeUnavailable(name: "Backup"))
+        #expect(await service.availability(of: data) == .volumeUnavailable(name: "Backup"))
         #expect(!engine.containsItem(at: "/Volumes/Backup/Folder"))
     }
 
@@ -42,13 +42,13 @@ struct AvailabilityCheckTests {
         engine.failResolution(of: "/Users/me/Folder", with: FakeErrors.corrupt)
         let data = BookmarkData(Data("garbage".utf8))
 
-        #expect(await bookmarks.availability(of: data) == .needsRegrant)
+        #expect(await service.availability(of: data) == .needsRegrant)
     }
 
     @Test func unsupportedKindsAreUnknown() async throws {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
 
-        #expect(await bookmarks.availability(of: data, kind: .documentScoped(.readWrite)) == .unknown)
+        #expect(await service.availability(of: data, kind: .documentScoped(.readWrite)) == .unknown)
     }
 
     @Test func checkingNeverStartsAccessOrRefreshes() async throws {
@@ -56,7 +56,7 @@ struct AvailabilityCheckTests {
         engine.moveItem(from: "/Users/me/Folder", to: "/Users/me/Moved")
         let before = engine.calls
 
-        _ = await bookmarks.availability(of: data)
+        _ = await service.availability(of: data)
 
         #expect(engine.calls.starts == before.starts)
         #expect(engine.calls.creations == before.creations)
@@ -66,7 +66,7 @@ struct AvailabilityCheckTests {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
         engine.removeItem(at: "/Users/me/Folder")
 
-        let recorded = bookmarks.recordedValues(in: data)
+        let recorded = service.recordedValues(in: data)
 
         #expect(recorded?.path == "/Users/me/Folder")
         #expect(recorded?.name == "Folder")
@@ -74,18 +74,18 @@ struct AvailabilityCheckTests {
     }
 }
 
-@Suite("Bookmarks: withAccess")
+@Suite("BookmarkService: withAccess")
 struct WithAccessTests {
     struct Failure: Error {}
 
     let engine = Fixtures.engine()
-    var bookmarks: Bookmarks { Fixtures.bookmarks(engine) }
+    var service: BookmarkService { Fixtures.service(engine) }
 
     @Test func holdsAccessWhileTheBodyRuns() async throws {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
         let engine = engine
 
-        let path = try await bookmarks.withAccess(to: data) { url in
+        let path = try await service.withAccess(to: data) { url in
             #expect(engine.isAccessing("/Users/me/Folder"))
             return url.path(percentEncoded: false)
         }
@@ -98,7 +98,7 @@ struct WithAccessTests {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
 
         await #expect(throws: Failure.self) {
-            try await bookmarks.withAccess(to: data) { _ in throw Failure() }
+            try await service.withAccess(to: data) { _ in throw Failure() }
         }
 
         #expect(engine.isBalanced)
@@ -109,7 +109,7 @@ struct WithAccessTests {
         engine.removeItem(at: "/Users/me/Folder")
 
         let error = await #expect(throws: BookmarkError.self) {
-            try await bookmarks.withAccess(to: data) { _ in }
+            try await service.withAccess(to: data) { _ in }
         }
 
         #expect(error?.failure == .missing)
@@ -119,7 +119,7 @@ struct WithAccessTests {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
         var touched = false
 
-        try await bookmarks.withAccess(to: data) { _ in
+        try await service.withAccess(to: data) { _ in
             MainActor.assertIsolated()
             touched = true
         }

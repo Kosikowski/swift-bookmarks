@@ -51,12 +51,31 @@ public struct SandboxEnvironment: Sendable, Hashable {
     /// The user's real home directory, which differs from `FileManager`'s home inside the sandbox.
     public static var realHomeDirectory: URL {
         #if os(macOS)
-        if let entry = getpwuid(getuid()), let directory = entry.pointee.pw_dir {
-            return URL(filePath: String(cString: directory), directoryHint: .isDirectory)
+        if let path = passwordHomeDirectory(of: getuid()) {
+            return URL(filePath: path, directoryHint: .isDirectory)
         }
         #endif
         return URL.homeDirectory
     }
+
+    #if os(macOS)
+    static func passwordHomeDirectory(of user: uid_t) -> String? {
+        let suggestedSize = sysconf(_SC_GETPW_R_SIZE_MAX)
+        var buffer = [CChar](repeating: 0, count: suggestedSize > 0 ? suggestedSize : 4096)
+        var entry = passwd()
+        var found: UnsafeMutablePointer<passwd>?
+        return buffer.withUnsafeMutableBufferPointer { buffer in
+            guard
+                getpwuid_r(user, &entry, buffer.baseAddress, buffer.count, &found) == 0,
+                found != nil,
+                let directory = entry.pw_dir
+            else {
+                return nil
+            }
+            return String(cString: directory)
+        }
+    }
+    #endif
 }
 
 extension SandboxEnvironment.Platform {

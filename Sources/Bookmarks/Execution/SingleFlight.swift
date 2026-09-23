@@ -6,6 +6,7 @@ final class SingleFlight<Key: Hashable & Sendable, Value: Sendable>: Sendable {
     private struct Flight {
         let id: UInt64
         let task: Task<Value, any Error>
+        var callers: Int
     }
 
     private struct State {
@@ -16,9 +17,11 @@ final class SingleFlight<Key: Hashable & Sendable, Value: Sendable>: Sendable {
     private let state = Mutex(State())
 
     func run(_ key: Key, _ operation: @escaping @Sendable () async throws -> Value) async throws -> Value {
-        let flight = state.withLock { state in
-            if let flight = state.flights[key] {
-                return flight
+        let task = state.withLock { state in
+            if var flight = state.flights[key] {
+                flight.callers += 1
+                state.flights[key] = flight
+                return flight.task
             }
             state.nextID += 1
             let id = state.nextID
@@ -26,15 +29,20 @@ final class SingleFlight<Key: Hashable & Sendable, Value: Sendable>: Sendable {
                 defer { self?.finish(key, id: id) }
                 return try await operation()
             }
-            let flight = Flight(id: id, task: task)
-            state.flights[key] = flight
-            return flight
+            state.flights[key] = Flight(id: id, task: task, callers: 1)
+            return task
         }
-        return try await Self.wait(for: flight.task)
+        return try await Self.wait(for: task)
     }
 
     var inFlightCount: Int {
         state.withLock { $0.flights.count }
+    }
+
+    func callers(where matches: (Key) -> Bool) -> Int {
+        state.withLock { state in
+            state.flights.filter { matches($0.key) }.values.reduce(0) { $0 + $1.callers }
+        }
     }
 
     private func finish(_ key: Key, id: UInt64) {

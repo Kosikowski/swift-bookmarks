@@ -7,7 +7,7 @@ import Testing
 struct DocumentBookmarksTests {
     let engine = Fixtures.engine()
     var documents: DocumentBookmarks {
-        DocumentBookmarks(document: URL(filePath: "/Users/me/Report.pages"), bookmarks: Fixtures.bookmarks(engine))
+        DocumentBookmarks(document: URL(filePath: "/Users/me/Report.pages"), service: Fixtures.service(engine))
     }
 
     init() {
@@ -26,7 +26,7 @@ struct DocumentBookmarksTests {
     }
 
     @Test func readOnlyAccess() async throws {
-        let readOnly = DocumentBookmarks(document: documents.document, access: .readOnly, bookmarks: Fixtures.bookmarks(engine))
+        let readOnly = DocumentBookmarks(document: documents.document, access: .readOnly, service: Fixtures.service(engine))
 
         _ = try await readOnly.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
 
@@ -46,7 +46,7 @@ struct DocumentBookmarksTests {
 
     @Test func refusesFolderAnchors() async {
         engine.addItem(at: "/Users/me/Package.bundle")
-        let documents = DocumentBookmarks(document: URL(filePath: "/Users/me/Package.bundle"), bookmarks: Fixtures.bookmarks(engine))
+        let documents = DocumentBookmarks(document: URL(filePath: "/Users/me/Package.bundle"), service: Fixtures.service(engine))
 
         let error = await #expect(throws: BookmarkError.self) {
             try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
@@ -59,7 +59,7 @@ struct DocumentBookmarksTests {
     }
 
     @Test func missingAnchorsAreMissing() async {
-        let documents = DocumentBookmarks(document: URL(filePath: "/Users/me/Gone.pages"), bookmarks: Fixtures.bookmarks(engine))
+        let documents = DocumentBookmarks(document: URL(filePath: "/Users/me/Gone.pages"), service: Fixtures.service(engine))
 
         let error = await #expect(throws: BookmarkError.self) {
             try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
@@ -71,7 +71,7 @@ struct DocumentBookmarksTests {
     @Test func resolvingAgainstAnotherDocumentFails() async throws {
         let data = try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
         engine.addItem(at: "/Users/me/Other.pages", isDirectory: false)
-        let other = DocumentBookmarks(document: URL(filePath: "/Users/me/Other.pages"), bookmarks: Fixtures.bookmarks(engine))
+        let other = DocumentBookmarks(document: URL(filePath: "/Users/me/Other.pages"), service: Fixtures.service(engine))
 
         let error = await #expect(throws: BookmarkError.self) { try await other.resolve(data) }
 
@@ -81,7 +81,7 @@ struct DocumentBookmarksTests {
     @Test func unsupportedOnIOS() async {
         let engine = Fixtures.engine(Fixtures.iOS)
         engine.addItem(at: "/Documents/Doc.pages", isDirectory: false)
-        let documents = DocumentBookmarks(document: URL(filePath: "/Documents/Doc.pages"), bookmarks: Fixtures.bookmarks(engine))
+        let documents = DocumentBookmarks(document: URL(filePath: "/Documents/Doc.pages"), service: Fixtures.service(engine))
 
         let error = await #expect(throws: BookmarkError.self) {
             try await documents.create(for: engine.grant("/Documents/Doc.pages", origin: .documentPicker))
@@ -106,11 +106,11 @@ struct DocumentBookmarksTests {
 @Suite("Handoff")
 struct HandoffTests {
     let engine = Fixtures.engine()
-    var handoff: Handoff { Handoff(bookmarks: Fixtures.bookmarks(engine)) }
+    var handoff: Handoff { Handoff(service: Fixtures.service(engine)) }
 
     func activeLease() async throws -> AccessLease {
         let data = try await Fixtures.adoptFolder("/Users/me/Shared", engine: engine)
-        return try await Fixtures.bookmarks(engine).resolve(data).beginAccess()
+        return try await Fixtures.service(engine).resolve(data).beginAccess()
     }
 
     @Test func tokensAreImplicitBookmarks() async throws {
@@ -150,7 +150,7 @@ struct HandoffTests {
 @Suite("AliasFiles")
 struct AliasFilesTests {
     let engine = Fixtures.engine()
-    var aliases: AliasFiles { AliasFiles(bookmarks: Fixtures.bookmarks(engine)) }
+    var aliases: AliasFiles { AliasFiles(service: Fixtures.service(engine)) }
 
     @Test func writesAndResolvesAliases() async throws {
         engine.addItem(at: "/Users/me/Target")
@@ -182,7 +182,7 @@ struct AliasFilesTests {
 
         let data = try await aliases.data(inAliasAt: URL(filePath: "/Users/me/Alias"))
 
-        #expect(Fixtures.bookmarks(engine).recordedValues(in: data)?.path == "/Users/me/Target")
+        #expect(Fixtures.service(engine).recordedValues(in: data)?.path == "/Users/me/Target")
     }
 
     @Test func missingAliasFilesAreMissing() async {
@@ -197,7 +197,7 @@ struct AliasFilesTests {
     @Test func writeFailuresAreClassified() async throws {
         engine.addItem(at: "/Users/me/Target")
         let engine = engine
-        let failing = AliasFiles(bookmarks: Bookmarks(engine: RejectingAliasEngine(base: engine), executor: Fixtures.executor))
+        let failing = AliasFiles(service: BookmarkService(engine: RejectingAliasEngine(base: engine), executor: Fixtures.executor))
 
         let error = await #expect(throws: BookmarkError.self) {
             try await failing.write(aliasTo: engine.grant("/Users/me/Target", origin: .fileImporter), at: URL(filePath: "/Users/me/Alias"))

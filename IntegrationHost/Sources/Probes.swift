@@ -10,7 +10,7 @@ struct ProbeResult: Identifiable, Sendable {
 /// Checks that answer the open questions in docs/design.md §11 on a real sandboxed build.
 struct Probes: Sendable {
     let engine = SystemBookmarkEngine()
-    var bookmarks: Bookmarks { Bookmarks(engine: engine) }
+    var service: BookmarkService { BookmarkService(engine: engine) }
 
     /// Question 1: does the system start access for this grant, and what does another start return?
     func systemStart(for grant: Grant) -> [ProbeResult] {
@@ -31,8 +31,8 @@ struct Probes: Sendable {
     func rebuiltURL(for grant: Grant) async -> [ProbeResult] {
         let name = "Rebuilt URL"
         do {
-            let resolved = try await bookmarks.adopt(grant, kind: .appScoped(.readWrite))
-            let rebuilt = URL(filePath: resolved.unscopedURL.path(percentEncoded: false))
+            let resolved = try await service.adopt(grant, kind: .appScoped(.readWrite))
+            let rebuilt = URL(filePath: resolved.displayPath)
             let rebuiltStarted = engine.startAccessing(rebuilt)
             var observations = [
                 ProbeResult(probe: name, detail: "start on rebuilt URL returned \(rebuiltStarted)"),
@@ -52,7 +52,7 @@ struct Probes: Sendable {
     /// Question 3: which failure does resolution report once the item or its volume is gone?
     func resolution(of data: BookmarkData) async -> [ProbeResult] {
         do {
-            let resolved = try await bookmarks.resolve(data, kind: .appScoped(.readWrite))
+            let resolved = try await service.resolve(data, kind: .appScoped(.readWrite))
             return [ProbeResult(probe: "Resolution", detail: "Resolved to \(resolved.displayPath), stale: \(resolved.wasStale)")]
         } catch {
             let underlying = (error.underlying as? NSError).map { "\($0.domain) \($0.code)" } ?? "none"
@@ -63,7 +63,7 @@ struct Probes: Sendable {
     /// Question 4: can a read-only app-scoped bookmark be created and used?
     func readOnlyBookmark(for grant: Grant) async -> [ProbeResult] {
         do {
-            let resolved = try await bookmarks.adopt(grant, kind: .appScoped(.readOnly))
+            let resolved = try await service.adopt(grant, kind: .appScoped(.readOnly))
             let lease = resolved.beginAccess()
             defer { lease.end() }
             return [ProbeResult(probe: "Read-only scope", detail: "Created; lease started: \(lease.didStartScope), readable: \(canRead(lease.url))")]
@@ -75,7 +75,7 @@ struct Probes: Sendable {
     /// Question 5: does an atomic save succeed with only a file-scoped bookmark?
     func atomicSave(for grant: Grant) async -> [ProbeResult] {
         do {
-            let resolved = try await bookmarks.adopt(grant, kind: .appScoped(.readWrite))
+            let resolved = try await service.adopt(grant, kind: .appScoped(.readWrite))
             let lease = resolved.beginAccess()
             defer { lease.end() }
             let original = try Data(contentsOf: lease.url)

@@ -60,11 +60,12 @@ public protocol GrantValidator: Sendable {
     func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal?
 }
 
-/// Refuses `/`, top-level system folders, the home folder and its ancestors.
+/// Refuses `/`, every top-level folder, other users' home folders, second-level system
+/// folders, and the user's home folder and its ancestors.
 ///
 /// Volume roots such as `/Volumes/External` are accepted.
 public struct NotTooBroadValidator: GrantValidator {
-    /// Extra paths to refuse, in addition to the built-in list.
+    /// Extra locations to refuse, in addition to the built-in rules.
     public var additionalPaths: Set<String>
 
     /// Creates the validator.
@@ -73,19 +74,20 @@ public struct NotTooBroadValidator: GrantValidator {
     }
 
     public func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal? {
-        let path = item.canonicalPath
-        let home = URL(filePath: context.homeDirectory.resolvingSymlinksInPath().path(percentEncoded: false))
-        let fixed: Set<String> = ["/", "/Users", "/Volumes", "/System", "/Library", "/Applications", "/private"]
-        if fixed.contains(path) || additionalPaths.contains(path) {
-            return .tooBroad(path: path)
+        let path = NormalizedPath(item.canonicalPath)
+        let home = NormalizedPath(context.homeDirectory.resolvingSymlinksInPath())
+        let isRefused = Self.isSystemLocation(path)
+            || path.contains(home)
+            || additionalPaths.contains { NormalizedPath(URL(filePath: $0).resolvingSymlinksInPath()) == path }
+        return isRefused ? .tooBroad(path: path.string) : nil
+    }
+
+    private static func isSystemLocation(_ path: NormalizedPath) -> Bool {
+        switch path.components.count {
+        case 0, 1: true
+        case 2: ["Users", "private", "System"].contains(path.components[0])
+        default: false
         }
-        if PathContainment.normalizedComponents(URL(filePath: path)).count == 2, path.hasPrefix("/Volumes/") {
-            return nil
-        }
-        if PathContainment.contains(URL(filePath: path), home) {
-            return .tooBroad(path: path)
-        }
-        return nil
     }
 }
 
@@ -127,19 +129,17 @@ public struct NoOverlapValidator: GrantValidator {
     }
 
     public func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal? {
-        let candidate = URL(filePath: item.canonicalPath)
+        let candidate = NormalizedPath(item.canonicalPath)
         for existingPath in context.existingPaths {
-            let existing = URL(filePath: existingPath)
-            let candidateComponents = PathContainment.normalizedComponents(candidate)
-            let existingComponents = PathContainment.normalizedComponents(existing)
-            if candidateComponents == existingComponents {
+            let existing = NormalizedPath(existingPath)
+            if candidate == existing {
                 return .duplicate(path: item.canonicalPath)
             }
             guard !allowsNesting else { continue }
-            if PathContainment.contains(existing, candidate) {
+            if existing.contains(candidate) {
                 return .insideExisting(existing: existingPath)
             }
-            if PathContainment.contains(candidate, existing) {
+            if candidate.contains(existing) {
                 return .containsExisting(existing: existingPath)
             }
         }
@@ -158,8 +158,8 @@ public struct CoversValidator: GrantValidator {
     }
 
     public func refusal(for item: ItemInfo, at url: URL, in context: ValidationContext) -> GrantRefusal? {
-        let resolvedTarget = URL(filePath: target.resolvingSymlinksInPath().path(percentEncoded: false))
-        return PathContainment.contains(URL(filePath: item.canonicalPath), resolvedTarget)
+        let resolvedTarget = NormalizedPath(target.resolvingSymlinksInPath())
+        return NormalizedPath(item.canonicalPath).contains(resolvedTarget)
             ? nil
             : .doesNotCover(target: target.path(percentEncoded: false))
     }
@@ -180,7 +180,7 @@ public struct CustomValidator: GrantValidator {
 }
 
 extension GrantValidator where Self == NotTooBroadValidator {
-    /// Refuses `/`, top-level system folders, the home folder and its ancestors.
+    /// Refuses `/`, top-level and system folders, home folders and their ancestors.
     public static var notTooBroad: NotTooBroadValidator { NotTooBroadValidator() }
 }
 

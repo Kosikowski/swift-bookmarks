@@ -224,7 +224,7 @@ struct FakeBookmarkEngineTests {
         @Test func systemStartedGrantsCountAsOutstanding() {
             base.engine.addItem(at: "/f")
 
-            let grant = base.engine.grant("/f", origin: .drop)
+            let grant = base.engine.grant("/f", origin: .appKitDrop)
 
             #expect(base.engine.outstandingAccess == ["/f": 1])
             base.engine.stopAccessing(grant.url)
@@ -254,10 +254,12 @@ struct FakeBookmarkEngineTests {
             #expect(base.engine.startsOnUnissuedURLs == ["/rebuilt"])
         }
 
-        @Test func unsandboxedStartsSucceedForAnyURL() {
+        @Test func unsandboxedStartsOnUnissuedURLsReturnFalse() {
             let engine = FakeBookmarkEngine(environment: SandboxEnvironment(platform: .macOS, isSandboxed: false))
 
-            #expect(engine.startAccessing(URL(filePath: "/anything")))
+            #expect(!engine.startAccessing(URL(filePath: "/anything")))
+            #expect(engine.startsOnUnissuedURLs == ["/anything"])
+            #expect(engine.isBalanced)
         }
 
         @Test func refusedStartsReturnFalse() {

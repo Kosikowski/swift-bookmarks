@@ -9,15 +9,15 @@ import Testing
 @Suite("System engine")
 struct SystemEngineTests {
     let sandbox = TemporaryDirectory()
-    let bookmarks = Bookmarks(engine: SystemBookmarkEngine(), executor: BlockingExecutor(label: "system-tests", width: 4))
+    let service = BookmarkService(engine: SystemBookmarkEngine(), executor: BlockingExecutor(label: "system-tests", width: 4))
 
     func grant(_ url: URL) -> Grant {
         Grant(url: url, origin: .alreadyAccessible)
     }
 
     @Test func runsUnsandboxed() {
-        #expect(!bookmarks.environment.isSandboxed)
-        #expect(bookmarks.defaultKind == .reference)
+        #expect(!service.environment.isSandboxed)
+        #expect(service.defaultKind == .reference)
     }
 
     @Test(arguments: [BookmarkKind.appScoped(.readWrite), .appScoped(.readOnly), .implicit, .reference, .alias])
@@ -25,19 +25,19 @@ struct SystemEngineTests {
         defer { sandbox.remove() }
         let folder = try sandbox.makeDirectory("Folder")
 
-        let data = try await bookmarks.create(for: grant(folder), kind: kind)
-        let resolved = try await bookmarks.resolve(data, kind: kind)
+        let data = try await service.create(for: grant(folder), kind: kind)
+        let resolved = try await service.resolve(data, kind: kind)
 
         #expect(!resolved.wasStale)
-        #expect(sandbox.canonical(resolved.unscopedURL) == sandbox.canonical(folder))
+        #expect(sandbox.canonical(resolved.url) == sandbox.canonical(folder))
     }
 
     @Test func leasesStartAccessOutsideTheSandbox() async throws {
         defer { sandbox.remove() }
         let folder = try sandbox.makeDirectory("Folder")
-        let data = try await bookmarks.create(for: grant(folder), kind: .appScoped(.readWrite))
+        let data = try await service.create(for: grant(folder), kind: .appScoped(.readWrite))
 
-        let lease = try await bookmarks.resolve(data, kind: .appScoped(.readWrite)).beginAccess()
+        let lease = try await service.resolve(data, kind: .appScoped(.readWrite)).beginAccess()
         defer { lease.end() }
 
         #expect(lease.didStartScope)
@@ -47,26 +47,26 @@ struct SystemEngineTests {
     @Test func renamesAreStaleAndRefreshed() async throws {
         defer { sandbox.remove() }
         let folder = try sandbox.makeDirectory("Before")
-        let data = try await bookmarks.create(for: grant(folder), kind: .appScoped(.readWrite))
+        let data = try await service.create(for: grant(folder), kind: .appScoped(.readWrite))
         let renamed = sandbox.url("After")
         try FileManager.default.moveItem(at: folder, to: renamed)
 
-        let resolved = try await bookmarks.resolve(data, kind: .appScoped(.readWrite))
+        let resolved = try await service.resolve(data, kind: .appScoped(.readWrite))
 
         #expect(resolved.wasStale)
-        #expect(sandbox.canonical(resolved.unscopedURL) == sandbox.canonical(renamed))
+        #expect(sandbox.canonical(resolved.url) == sandbox.canonical(renamed))
         let refreshed = try #require(resolved.refreshedData)
-        #expect(try await !bookmarks.resolve(refreshed, kind: .appScoped(.readWrite)).wasStale)
+        #expect(try await !service.resolve(refreshed, kind: .appScoped(.readWrite)).wasStale)
     }
 
     @Test func renamingAParentMakesChildrenStale() async throws {
         defer { sandbox.remove() }
         let parent = try sandbox.makeDirectory("Parent")
         let child = try sandbox.makeDirectory("Parent/Child")
-        let data = try await bookmarks.create(for: grant(child), kind: .reference)
+        let data = try await service.create(for: grant(child), kind: .reference)
         try FileManager.default.moveItem(at: parent, to: sandbox.url("Renamed"))
 
-        let resolved = try await bookmarks.resolve(data, kind: .reference)
+        let resolved = try await service.resolve(data, kind: .reference)
 
         #expect(resolved.wasStale)
         #expect(resolved.displayPath.hasSuffix("/Renamed/Child/"))
@@ -75,22 +75,22 @@ struct SystemEngineTests {
     @Test func atomicSavesKeepTheBookmarkWorking() async throws {
         defer { sandbox.remove() }
         let file = try sandbox.makeFile("Notes.md", contents: "one")
-        let data = try await bookmarks.create(for: grant(file), kind: .appScoped(.readWrite))
+        let data = try await service.create(for: grant(file), kind: .appScoped(.readWrite))
         try Data("two".utf8).write(to: file, options: .atomic)
 
-        let resolved = try await bookmarks.resolve(data, kind: .appScoped(.readWrite))
+        let resolved = try await service.resolve(data, kind: .appScoped(.readWrite))
 
-        #expect(sandbox.canonical(resolved.unscopedURL) == sandbox.canonical(file))
+        #expect(sandbox.canonical(resolved.url) == sandbox.canonical(file))
     }
 
     @Test func deletedItemsAreMissing() async throws {
         defer { sandbox.remove() }
         let folder = try sandbox.makeDirectory("Gone")
-        let data = try await bookmarks.create(for: grant(folder), kind: .appScoped(.readWrite))
+        let data = try await service.create(for: grant(folder), kind: .appScoped(.readWrite))
         try FileManager.default.removeItem(at: folder)
 
         let error = await #expect(throws: BookmarkError.self) {
-            try await bookmarks.resolve(data, kind: .appScoped(.readWrite))
+            try await service.resolve(data, kind: .appScoped(.readWrite))
         }
 
         #expect(error?.failure == .missing)
@@ -100,18 +100,18 @@ struct SystemEngineTests {
     @Test func availabilityReflectsTheFileSystem() async throws {
         defer { sandbox.remove() }
         let folder = try sandbox.makeDirectory("Folder")
-        let data = try await bookmarks.create(for: grant(folder), kind: .reference)
+        let data = try await service.create(for: grant(folder), kind: .reference)
 
-        #expect(await bookmarks.availability(of: data, kind: .reference) == .available)
+        #expect(await service.availability(of: data, kind: .reference) == .available)
         try FileManager.default.removeItem(at: folder)
-        #expect(await bookmarks.availability(of: data, kind: .reference) == .missing)
+        #expect(await service.availability(of: data, kind: .reference) == .missing)
     }
 
     @Test func creatingABookmarkToNothingFails() async {
         defer { sandbox.remove() }
 
         let error = await #expect(throws: BookmarkError.self) {
-            try await bookmarks.create(for: grant(sandbox.url("Nothing")), kind: .reference)
+            try await service.create(for: grant(sandbox.url("Nothing")), kind: .reference)
         }
 
         #expect(error?.failure == .missing)
@@ -119,7 +119,7 @@ struct SystemEngineTests {
 
     @Test func garbageIsCorrupt() async {
         let error = await #expect(throws: BookmarkError.self) {
-            try await bookmarks.resolve(BookmarkData(Data("not a bookmark".utf8)), kind: .appScoped(.readWrite))
+            try await service.resolve(BookmarkData(Data("not a bookmark".utf8)), kind: .appScoped(.readWrite))
         }
 
         #expect(error?.failure == .corrupt)
@@ -128,10 +128,10 @@ struct SystemEngineTests {
     @Test func plainBookmarksResolvedWithScopeNeedARegrant() async throws {
         defer { sandbox.remove() }
         let folder = try sandbox.makeDirectory("Folder")
-        let data = try await bookmarks.create(for: grant(folder), kind: .reference)
+        let data = try await service.create(for: grant(folder), kind: .reference)
 
         let error = await #expect(throws: BookmarkError.self) {
-            try await bookmarks.resolve(data, kind: .appScoped(.readWrite))
+            try await service.resolve(data, kind: .appScoped(.readWrite))
         }
 
         #expect(error?.failure == .needsRegrant)
@@ -143,7 +143,7 @@ struct SystemEngineTests {
         let image = try sandbox.makeFile("Image.png", contents: "png")
 
         let error = await #expect(throws: BookmarkError.self) {
-            try await DocumentBookmarks(document: document, bookmarks: bookmarks).create(for: grant(image))
+            try await DocumentBookmarks(document: document, service: service).create(for: grant(image))
         }
 
         #expect(error?.failure == .denied)
@@ -152,10 +152,10 @@ struct SystemEngineTests {
     @Test func recordedValuesSurviveDeletion() async throws {
         defer { sandbox.remove() }
         let folder = try sandbox.makeDirectory("Recorded")
-        let data = try await bookmarks.create(for: grant(folder), kind: .appScoped(.readWrite))
+        let data = try await service.create(for: grant(folder), kind: .appScoped(.readWrite))
         try FileManager.default.removeItem(at: folder)
 
-        let recorded = try #require(bookmarks.recordedValues(in: data))
+        let recorded = try #require(service.recordedValues(in: data))
 
         #expect(recorded.name == "Recorded")
         #expect(recorded.path?.hasSuffix("/Recorded") == true)
@@ -166,9 +166,9 @@ struct SystemEngineTests {
     @Test func extraResourceValuesAreStored() async throws {
         defer { sandbox.remove() }
         let file = try sandbox.makeFile("Sized.txt", contents: "12345")
-        let plain = try await bookmarks.create(for: grant(file), kind: .reference)
+        let plain = try await service.create(for: grant(file), kind: .reference)
 
-        let withSize = try await bookmarks.create(for: grant(file), kind: .reference, includingResourceValuesFor: [.fileSizeKey])
+        let withSize = try await service.create(for: grant(file), kind: .reference, includingResourceValuesFor: [.fileSizeKey])
 
         #expect(URL.resourceValues(forKeys: [.fileSizeKey], fromBookmarkData: withSize.rawValue)?.fileSize == 5)
         #expect(withSize.count > plain.count)
@@ -178,21 +178,21 @@ struct SystemEngineTests {
         defer { sandbox.remove() }
         let target = try sandbox.makeDirectory("Target")
         let alias = sandbox.url("Target alias")
-        let aliases = AliasFiles(bookmarks: bookmarks)
+        let aliases = AliasFiles(service: service)
 
         try await aliases.write(aliasTo: grant(target), at: alias)
         let resolved = try await aliases.resolve(aliasAt: alias)
 
         #expect(try alias.resourceValues(forKeys: [.isAliasFileKey]).isAliasFile == true)
-        #expect(sandbox.canonical(resolved.unscopedURL) == sandbox.canonical(target))
+        #expect(sandbox.canonical(resolved.url) == sandbox.canonical(target))
     }
 
     @Test func handoffTokensCarryAccessBetweenResolutions() async throws {
         defer { sandbox.remove() }
         let folder = try sandbox.makeDirectory("Shared")
-        let data = try await bookmarks.create(for: grant(folder), kind: .appScoped(.readWrite))
-        let lease = try await bookmarks.resolve(data, kind: .appScoped(.readWrite)).beginAccess()
-        let handoff = Handoff(bookmarks: bookmarks)
+        let data = try await service.create(for: grant(folder), kind: .appScoped(.readWrite))
+        let lease = try await service.resolve(data, kind: .appScoped(.readWrite)).beginAccess()
+        let handoff = Handoff(service: service)
 
         let token = try await handoff.makeToken(for: lease)
         lease.end()
@@ -252,13 +252,13 @@ struct SystemStoreTests {
 
     @Test func persistsRefreshedBookmarksAcrossStoreInstances() async throws {
         defer { sandbox.remove() }
-        let bookmarks = Bookmarks(engine: SystemBookmarkEngine(), executor: BlockingExecutor(label: "system-store", width: 2))
+        let service = BookmarkService(engine: SystemBookmarkEngine(), executor: BlockingExecutor(label: "system-store", width: 2))
         let file = sandbox.url("Store/bookmarks.json")
         let folder = try sandbox.makeDirectory("Project")
         let first = BookmarkStore<BookmarkID, NoMetadata>(
             persistence: JSONFilePersistence(fileURL: file),
             kind: .appScoped(.readWrite),
-            bookmarks: bookmarks
+            service: service
         )
         let record = try await first.add(Grant(url: folder, origin: .alreadyAccessible))
         let moved = sandbox.url("Moved Project")
@@ -267,7 +267,7 @@ struct SystemStoreTests {
         let second = BookmarkStore<BookmarkID, NoMetadata>(
             persistence: JSONFilePersistence(fileURL: file),
             kind: .appScoped(.readWrite),
-            bookmarks: bookmarks
+            service: service
         )
         let path = try await second.withAccess(to: record.key) { sandbox.canonical($0) }
         let stored = try #require(try second.record(record.key))
@@ -300,7 +300,7 @@ struct TemporaryDirectory {
     }
 
     func canonical(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().path(percentEncoded: false).trimmingTrailingSlash
+        NormalizedPath(url.resolvingSymlinksInPath()).string
     }
 
     func remove() {

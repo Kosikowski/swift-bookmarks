@@ -68,9 +68,16 @@ struct BookmarkKindTests {
 
         @Test(arguments: BookmarkKindTests.allKinds)
         func everyKindIsSupportedOnMacWithTheRightInputs(_ kind: BookmarkKind) {
+            let anchor = kind.accessMode != nil && !kind.isAppScoped ? document : nil
+
+            #expect(kind.unsupportedReason(in: .init(platform: .macOS, isSandboxed: true), relativeTo: anchor) == nil)
+        }
+
+        @Test(arguments: [BookmarkKind.appScoped(.readWrite), .implicit, .reference, .alias])
+        func onlyDocumentScopedKindsTakeAnAnchor(_ kind: BookmarkKind) {
             let reason = kind.unsupportedReason(in: .init(platform: .macOS, isSandboxed: true), relativeTo: document)
 
-            #expect(reason == nil)
+            #expect(reason == "Only document-scoped bookmarks are anchored on a document.")
         }
 
         @Test(arguments: [BookmarkKind.appScoped(.readWrite), .documentScoped(.readOnly)])
@@ -88,7 +95,7 @@ struct BookmarkKindTests {
         @Test func documentScopeNeedsADocument() {
             let reason = BookmarkKind.documentScoped(.readWrite).unsupportedReason(in: .init(platform: .macOS, isSandboxed: true), relativeTo: nil)
 
-            #expect(reason?.contains("document") == true)
+            #expect(reason?.contains("DocumentBookmarks") == true)
         }
     }
 
@@ -138,4 +145,10 @@ struct BookmarkKindTests {
         }
     }
     #endif
+}
+
+extension BookmarkKind {
+    fileprivate var isAppScoped: Bool {
+        if case .appScoped = self { true } else { false }
+    }
 }

@@ -4,7 +4,8 @@ import Foundation
 ///
 /// Implement this to keep an existing storage format: map the stored shape to
 /// ``BookmarkRecord`` in ``load()`` and back in ``save(_:)``, keeping keys and bookmark bytes
-/// unchanged. Both methods are called synchronously and should be quick.
+/// unchanged. ``BookmarkStore`` calls both methods on its blocking executor, one at a time,
+/// and they must not call back into the store.
 public protocol BookmarkPersistence<Key, Metadata>: Sendable {
     associatedtype Key: Hashable & Sendable & Codable
     associatedtype Metadata: Sendable & Codable

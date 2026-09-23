@@ -30,21 +30,19 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
         }
     }
 
-    /// A lease on `url` for `key`, reusing the active access for `key` when there is one.
+    /// A lease on the resolved item for `key`, reusing the active access for `key` when there
+    /// is one.
     ///
-    /// When `key` is already active, `url` is ignored so the system start isn't repeated.
-    ///
-    /// - Parameter alreadyStarted: `url` arrived with access started by the system, as panel
-    ///   and drop URLs do on macOS. The lease takes ownership of that start.
-    public func lease(for key: Key, url: URL, alreadyStarted: Bool = false) -> AccessLease {
+    /// When `key` is already active, `resolved` isn't used, so the system start isn't repeated.
+    public func lease(for key: Key, resolved: ResolvedBookmark) -> AccessLease {
+        lease(for: key, handle: resolved.handle)
+    }
+
+    func lease(for key: Key, handle: ScopeHandle) -> AccessLease {
         let lease = handles.withLock { handles in
-            if let handle = handles[key], !handle.isIdle {
-                if alreadyStarted {
-                    engine.stopAccessing(url)
-                }
-                return AccessLease(handle: handle)
+            if let active = handles[key], !active.isIdle {
+                return AccessLease(handle: active)
             }
-            let handle = ScopeHandle(url: url, engine: engine, alreadyStarted: alreadyStarted)
             handle.onIdle { [weak self] idle in
                 self?.remove(idle, for: key)
             }
@@ -60,11 +58,13 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
     /// Leasing a covering directory avoids one system start per file, which exhausts the
     /// kernel's sandbox extension table.
     public func lease(covering url: URL) -> AccessLease? {
-        handles.withLock { handles in
+        let target = NormalizedPath(url)
+        return handles.withLock { handles in
             let covering = handles.values
-                .filter { !$0.isIdle && PathContainment.contains($0.url, url) }
-                .max { PathContainment.normalizedComponents($0.url).count < PathContainment.normalizedComponents($1.url).count }
-            return covering.map(AccessLease.init(handle:))
+                .map { (handle: $0, path: NormalizedPath($0.url)) }
+                .filter { !$0.handle.isIdle && $0.path.contains(target) }
+                .max { $0.path.components.count < $1.path.components.count }
+            return covering.map { AccessLease(handle: $0.handle) }
         }
     }
 

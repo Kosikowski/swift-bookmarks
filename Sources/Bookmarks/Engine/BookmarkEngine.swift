@@ -3,7 +3,8 @@ public import Foundation
 /// The only boundary between the library and the operating system.
 ///
 /// Every call is synchronous and may block, so the library always calls an engine through a
-/// ``BlockingExecutor``. Implementations must be safe to call from any thread.
+/// ``BlockingExecutor``. Implementations must be safe to call from any thread and must not call
+/// back into the library: starts and stops run while the library holds its locks.
 /// ``SystemBookmarkEngine`` is the real implementation; `BookmarksTesting` provides a fake.
 public protocol BookmarkEngine: Sendable {
     /// The environment the engine operates in.

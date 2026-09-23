@@ -47,30 +47,11 @@ public final class AccessLease: Sendable {
     ///
     /// Returns `nil` when `descendant` isn't the leased item or inside it.
     public func url(forDescendant descendant: URL) -> URL? {
-        guard let components = PathContainment.relativeComponents(of: descendant, in: url) else {
+        guard let components = NormalizedPath(url).relativeComponents(of: NormalizedPath(descendant)) else {
             return nil
         }
         return components.reduce(url) { partial, component in
             partial.appending(path: component, directoryHint: .inferFromPath)
         }
-    }
-}
-
-enum PathContainment {
-    static func relativeComponents(of candidate: URL, in root: URL) -> [String]? {
-        let rootComponents = normalizedComponents(root)
-        let candidateComponents = normalizedComponents(candidate)
-        guard candidateComponents.starts(with: rootComponents) else { return nil }
-        return Array(candidateComponents.dropFirst(rootComponents.count))
-    }
-
-    static func contains(_ root: URL, _ candidate: URL) -> Bool {
-        relativeComponents(of: candidate, in: root) != nil
-    }
-
-    static func normalizedComponents(_ url: URL) -> [String] {
-        url.standardizedFileURL.path(percentEncoded: false)
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .map(String.init)
     }
 }

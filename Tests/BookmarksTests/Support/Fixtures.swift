@@ -13,8 +13,8 @@ enum Fixtures {
         FakeBookmarkEngine(environment: environment)
     }
 
-    static func bookmarks(_ engine: FakeBookmarkEngine, timeout: Duration? = nil) -> Bookmarks {
-        Bookmarks(engine: engine, executor: executor, timeout: timeout)
+    static func service(_ engine: FakeBookmarkEngine, timeout: Duration? = nil) -> BookmarkService {
+        BookmarkService(engine: engine, executor: executor, timeout: timeout)
     }
 
     static func adoptFolder(
@@ -23,8 +23,8 @@ enum Fixtures {
         kind: BookmarkKind = .appScoped(.readWrite)
     ) async throws -> BookmarkData {
         engine.addItem(at: path)
-        let bookmarks = bookmarks(engine)
-        return try await bookmarks.adopt(engine.grant(path, origin: .openPanel), kind: kind).data
+        let service = service(engine)
+        return try await service.adopt(engine.grant(path, origin: .openPanel), kind: kind).data
     }
 }
 

@@ -10,11 +10,11 @@ import Foundation
 /// alternative to tokens.
 public struct Handoff: Sendable {
     /// The bookmark service.
-    public let bookmarks: Bookmarks
+    public let service: BookmarkService
 
     /// Creates a handoff helper.
-    public init(bookmarks: Bookmarks = Bookmarks()) {
-        self.bookmarks = bookmarks
+    public init(service: BookmarkService = BookmarkService()) {
+        self.service = service
     }
 
     /// Creates a token for the item behind an active lease.
@@ -22,14 +22,14 @@ public struct Handoff: Sendable {
         guard lease.isActive else {
             throw BookmarkError(.denied, lastKnownPath: lease.url.path(percentEncoded: false))
         }
-        return try await bookmarks.create(for: Grant(url: lease.url, origin: .alreadyAccessible), kind: .implicit)
+        return try await service.create(for: Grant(url: lease.url, origin: .alreadyAccessible), kind: .implicit)
     }
 
     /// Resolves a token received from another process and takes over the access it carries.
     ///
     /// End the returned lease when done; it balances the access started by resolution.
     public func receive(_ token: BookmarkData) async throws(BookmarkError) -> AccessLease {
-        let resolved = try await bookmarks.resolve(token, kind: .implicit, policy: ResolutionPolicy(startsImplicitAccess: true))
+        let resolved = try await service.resolve(token, kind: .implicit, policy: ResolutionPolicy(startsImplicitAccess: true))
         return resolved.beginAccess()
     }
 }

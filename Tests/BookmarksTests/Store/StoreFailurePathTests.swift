@@ -41,7 +41,7 @@ struct StoreFailurePathTests {
 
         let task = Task { try await store.lease("a") }
         await gate.waitUntilReached()
-        try store.forget("a")
+        try await store.forget("a")
         gate.open()
 
         await #expect(throws: TestStore.Failure.self) { try await task.value }
@@ -104,13 +104,6 @@ struct PersistenceReadFailureTests {
 
         #expect(UserDefaults.standard.data(forKey: key) != nil)
         #expect(try persistence.load().isEmpty)
-    }
-
-    @Test func migrationWithoutCleanUpStillImports() throws {
-        let record = TestRecord(key: "a", data: BookmarkData(Data([1])), kind: .reference, lastKnownPath: "/a", createdAt: Date(), metadata: Tag(name: "a"))
-        let migrating = MigratingPersistence(base: InMemoryPersistence<String, Tag>(), legacy: { [record] })
-
-        #expect(try migrating.load() == [record])
     }
 }
 

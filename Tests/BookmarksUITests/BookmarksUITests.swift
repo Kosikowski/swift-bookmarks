@@ -81,9 +81,9 @@ struct GrantMappingTests {
     @Test func keepsFileURLsWithTheirOrigin() {
         let urls = [URL(filePath: "/a"), URL(string: "https://example.com")!, URL(filePath: "/b")]
 
-        let grants = GrantMapping.grants(from: urls, origin: .drop)
+        let grants = GrantMapping.grants(from: urls, origin: .appKitDrop)
 
-        #expect(grants == [Grant(url: URL(filePath: "/a"), origin: .drop), Grant(url: URL(filePath: "/b"), origin: .drop)])
+        #expect(grants == [Grant(url: URL(filePath: "/a"), origin: .appKitDrop), Grant(url: URL(filePath: "/b"), origin: .appKitDrop)])
     }
 
     @Test func importerResultsBecomeImporterGrants() throws {
@@ -132,7 +132,7 @@ struct OpenPanelPickerTests {
     @Test func regrantingAnUnknownKeyFailsWithoutAPanel() async {
         let store = BookmarkStore<String, NoMetadata>(
             persistence: InMemoryPersistence(),
-            bookmarks: Bookmarks(engine: FakeBookmarkEngine())
+            service: BookmarkService(engine: FakeBookmarkEngine())
         )
 
         await #expect(throws: BookmarkStoreError<String>.self) {

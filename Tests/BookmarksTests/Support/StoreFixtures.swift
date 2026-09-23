@@ -78,7 +78,7 @@ struct StoreHarness {
         store = TestStore(
             persistence: persistence,
             policy: policy,
-            bookmarks: Fixtures.bookmarks(engine, timeout: timeout),
+            service: Fixtures.service(engine, timeout: timeout),
             now: clock.function
         )
     }

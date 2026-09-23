@@ -17,11 +17,15 @@ struct AccessRegistryTests {
         return engine.grant(path, origin: .fileImporter).url
     }
 
+    func lease(_ key: String, _ url: URL, alreadyStarted: Bool = false) -> AccessLease {
+        registry.lease(for: key, handle: ScopeHandle(url: url, engine: engine, alreadyStarted: alreadyStarted))
+    }
+
     @Test func startsOncePerKey() {
         let url = issue("/A")
 
-        let first = registry.lease(for: "a", url: url)
-        let second = registry.lease(for: "a", url: url)
+        let first = lease("a", url)
+        let second = lease("a", url)
 
         #expect(engine.calls.starts == 1)
         #expect(first.isActive && second.isActive)
@@ -34,8 +38,8 @@ struct AccessRegistryTests {
         let original = issue("/A")
         let other = issue("/A-copy")
 
-        let first = registry.lease(for: "a", url: original)
-        let second = registry.lease(for: "a", url: other)
+        let first = lease("a", original)
+        let second = lease("a", other)
 
         #expect(second.url == original)
         #expect(engine.calls.starts == 1)
@@ -49,8 +53,8 @@ struct AccessRegistryTests {
         engine.addItem(at: "/Panel")
         let grant = engine.grant("/Panel", origin: .openPanel)
 
-        let first = registry.lease(for: "a", url: url)
-        let second = registry.lease(for: "a", url: grant.url, alreadyStarted: true)
+        let first = lease("a", url)
+        let second = lease("a", grant.url, alreadyStarted: true)
 
         #expect(!engine.isAccessing("/Panel"))
         first.end()
@@ -62,18 +66,34 @@ struct AccessRegistryTests {
         engine.addItem(at: "/Panel")
         let grant = engine.grant("/Panel", origin: .openPanel)
 
-        let lease = registry.lease(for: "p", url: grant.url, alreadyStarted: true)
+        let lease = lease("p", grant.url, alreadyStarted: true)
 
         #expect(engine.calls.starts == 0)
         lease.end()
         #expect(engine.isBalanced)
     }
 
+    @Test func leasesAResolvedBookmarkAndSharesItsStart() async throws {
+        let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
+        let resolved = try await Fixtures.service(engine).resolve(data)
+
+        let registered = registry.lease(for: "folder", resolved: resolved)
+        let direct = resolved.beginAccess()
+
+        #expect(registered.url == direct.url)
+        #expect(engine.calls.starts == 1)
+        registered.end()
+        #expect(engine.isAccessing("/Users/me/Folder"))
+        direct.end()
+        #expect(engine.isBalanced)
+        #expect(registry.activeKeys.isEmpty)
+    }
+
     @Test func activeLeaseOnlyExistsWhileLeased() {
         let url = issue("/A")
         #expect(registry.activeLease(for: "a") == nil)
 
-        let lease = registry.lease(for: "a", url: url)
+        let lease = lease("a", url)
         let extra = registry.activeLease(for: "a")
         #expect(extra?.url == url)
         #expect(engine.calls.starts == 1)
@@ -85,7 +105,7 @@ struct AccessRegistryTests {
     }
 
     @Test func forgetsKeysOnceIdle() {
-        let lease = registry.lease(for: "a", url: issue("/A"))
+        let lease = lease("a", issue("/A"))
         #expect(registry.activeKeys == ["a"])
 
         lease.end()
@@ -96,10 +116,10 @@ struct AccessRegistryTests {
 
     @Test func detachedLeasesKeepAccessUntilTheyEnd() {
         let url = issue("/A")
-        let old = registry.lease(for: "a", url: url)
+        let old = lease("a", url)
 
         registry.detach("a")
-        let fresh = registry.lease(for: "a", url: url)
+        let fresh = lease("a", url)
 
         #expect(old.isActive)
         #expect(engine.calls.starts == 2)
@@ -110,9 +130,9 @@ struct AccessRegistryTests {
     }
 
     @Test func endAllStopsEverythingOnce() {
-        let a = registry.lease(for: "a", url: issue("/A"))
-        let a2 = registry.lease(for: "a", url: issue("/A"))
-        let b = registry.lease(for: "b", url: issue("/B"))
+        let a = lease("a", issue("/A"))
+        let a2 = lease("a", issue("/A"))
+        let b = lease("b", issue("/B"))
 
         registry.endAll()
 
@@ -127,9 +147,9 @@ struct AccessRegistryTests {
     }
 
     @Test func countsStartedScopes() {
-        let a = registry.lease(for: "a", url: issue("/A"))
+        let a = lease("a", issue("/A"))
         engine.refuseAccess(to: "/B")
-        let b = registry.lease(for: "b", url: issue("/B"))
+        let b = lease("b", issue("/B"))
 
         #expect(registry.startedScopeCount == 1)
         #expect(registry.activeKeys == ["a", "b"])
@@ -139,36 +159,30 @@ struct AccessRegistryTests {
 
     @Suite("Covering leases")
     struct Covering {
-        let engine = Fixtures.engine()
-        let registry: AccessRegistry<String>
-
-        init() {
-            registry = AccessRegistry(engine: engine)
-        }
+        let base = AccessRegistryTests()
 
         func lease(_ key: String, _ path: String) -> AccessLease {
-            engine.addItem(at: path)
-            return registry.lease(for: key, url: engine.grant(path, origin: .fileImporter).url)
+            base.lease(key, base.issue(path))
         }
 
         @Test func findsTheDeepestActiveAncestor() {
             let outer = lease("outer", "/Users/me")
             let inner = lease("inner", "/Users/me/Projects")
 
-            let covering = registry.lease(covering: URL(filePath: "/Users/me/Projects/App/File.swift"))
+            let covering = base.registry.lease(covering: URL(filePath: "/Users/me/Projects/App/File.swift"))
 
             #expect(covering?.url == inner.url)
-            #expect(engine.calls.starts == 2)
+            #expect(base.engine.calls.starts == 2)
             covering?.end()
             outer.end()
             inner.end()
-            #expect(engine.isBalanced)
+            #expect(base.engine.isBalanced)
         }
 
         @Test func coversTheItemItself() {
             let root = lease("root", "/Users/me/Projects")
 
-            #expect(registry.lease(covering: URL(filePath: "/Users/me/Projects")) != nil)
+            #expect(base.registry.lease(covering: URL(filePath: "/Users/me/Projects")) != nil)
             root.end()
         }
 
@@ -176,19 +190,21 @@ struct AccessRegistryTests {
             lease("idle", "/Users/me/Idle").end()
             let other = lease("other", "/Users/me/Other")
 
-            #expect(registry.lease(covering: URL(filePath: "/Users/me/Idle/File")) == nil)
-            #expect(registry.lease(covering: URL(filePath: "/Users/me/Elsewhere")) == nil)
+            #expect(base.registry.lease(covering: URL(filePath: "/Users/me/Idle/File")) == nil)
+            #expect(base.registry.lease(covering: URL(filePath: "/Users/me/Elsewhere")) == nil)
             other.end()
         }
     }
 
     @Test func concurrentLeasingStaysBalanced() async {
         let urls = (0..<10).map { issue("/Items/\($0)") }
+        let registry = registry
+        let engine = engine
 
         await withTaskGroup(of: Void.self) { group in
             for index in 0..<200 {
                 group.addTask {
-                    let lease = registry.lease(for: "\(index % 10)", url: urls[index % 10])
+                    let lease = registry.lease(for: "\(index % 10)", handle: ScopeHandle(url: urls[index % 10], engine: engine))
                     await Task.yield()
                     lease.end()
                 }
@@ -202,13 +218,19 @@ struct AccessRegistryTests {
 
 @Suite("AccessRegistry soft limit")
 struct AccessRegistrySoftLimitTests {
-    @Test func flagsWhenStartedScopesExceedTheSoftLimit() {
+    func leases(_ count: Int, softLimit: Int) -> (FakeBookmarkEngine, AccessRegistry<Int>, [AccessLease]) {
         let engine = Fixtures.engine()
-        let registry = AccessRegistry<Int>(engine: engine, softLimit: 2)
-        let leases = (0..<3).map { index -> AccessLease in
+        let registry = AccessRegistry<Int>(engine: engine, softLimit: softLimit)
+        let leases = (0..<count).map { index -> AccessLease in
             engine.addItem(at: "/Items/\(index)")
-            return registry.lease(for: index, url: engine.grant("/Items/\(index)", origin: .fileImporter).url)
+            let url = engine.grant("/Items/\(index)", origin: .fileImporter).url
+            return registry.lease(for: index, handle: ScopeHandle(url: url, engine: engine))
         }
+        return (engine, registry, leases)
+    }
+
+    @Test func flagsWhenStartedScopesExceedTheSoftLimit() {
+        let (engine, registry, leases) = leases(3, softLimit: 2)
 
         #expect(registry.hasExceededSoftLimit)
         leases.forEach { $0.end() }
@@ -216,13 +238,9 @@ struct AccessRegistrySoftLimitTests {
     }
 
     @Test func staysQuietBelowTheSoftLimit() {
-        let engine = Fixtures.engine()
-        let registry = AccessRegistry<Int>(engine: engine, softLimit: 2)
-        engine.addItem(at: "/Items/0")
-
-        let lease = registry.lease(for: 0, url: engine.grant("/Items/0", origin: .fileImporter).url)
+        let (_, registry, leases) = leases(1, softLimit: 2)
 
         #expect(!registry.hasExceededSoftLimit)
-        lease.end()
+        leases.forEach { $0.end() }
     }
 }

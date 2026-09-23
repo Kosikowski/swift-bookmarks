@@ -139,14 +139,27 @@ public final class FakeBookmarkEngine: BookmarkEngine, Sendable {
         state.withLock { $0.unbalancedStops }
     }
 
-    /// Starts on URLs that were neither granted nor resolved by this engine.
+    /// Starts on URLs that were neither granted nor resolved by this engine. They return `false`,
+    /// as the system does for URLs that carry no scope.
     public var startsOnUnissuedURLs: [String] {
         state.withLock { $0.unissuedStarts }
     }
 
     /// Whether every start has been balanced by exactly one stop.
     public var isBalanced: Bool {
-        state.withLock { $0.outstanding.values.allSatisfy { $0 == 0 } && $0.unbalancedStops.isEmpty }
+        balanceReport.isBalanced
+    }
+
+    /// Outstanding starts, unbalanced stops and starts on unissued URLs, in one value that
+    /// describes itself, for readable test failures.
+    public var balanceReport: BalanceReport {
+        state.withLock { state in
+            BalanceReport(
+                outstanding: state.outstanding.filter { $0.value != 0 },
+                unbalancedStops: state.unbalancedStops,
+                startsOnUnissuedURLs: state.unissuedStarts
+            )
+        }
     }
 
     /// Whether access to `path` is currently held.
@@ -281,7 +294,7 @@ public final class FakeBookmarkEngine: BookmarkEngine, Sendable {
             guard !state.refused.contains(path) else { return false }
             guard state.issued.contains(path) else {
                 state.unissuedStarts.append(path)
-                return !environment.isSandboxed
+                return false
             }
             state.recordStart(path)
             return true

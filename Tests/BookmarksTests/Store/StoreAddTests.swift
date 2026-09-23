@@ -58,7 +58,7 @@ struct StoreAddTests {
         let engine = Fixtures.engine()
         let store = BookmarkStore<BookmarkID, NoMetadata>(
             persistence: InMemoryPersistence(),
-            bookmarks: Fixtures.bookmarks(engine)
+            service: Fixtures.service(engine)
         )
         engine.addItem(at: "/A")
         engine.addItem(at: "/B")
@@ -72,7 +72,7 @@ struct StoreAddTests {
 
     @Test func noMetadataConvenienceWithAKey() async throws {
         let engine = Fixtures.engine()
-        let store = BookmarkStore<String, NoMetadata>(persistence: InMemoryPersistence(), bookmarks: Fixtures.bookmarks(engine))
+        let store = BookmarkStore<String, NoMetadata>(persistence: InMemoryPersistence(), service: Fixtures.service(engine))
         engine.addItem(at: "/A")
 
         let record = try await store.add(engine.grant("/A", origin: .openPanel), key: "a")
@@ -82,7 +82,7 @@ struct StoreAddTests {
 
     @Test func usesTheStoresKind() async throws {
         let engine = Fixtures.engine()
-        let store = TestStore(persistence: InMemoryPersistence(), kind: .appScoped(.readOnly), bookmarks: Fixtures.bookmarks(engine))
+        let store = TestStore(persistence: InMemoryPersistence(), kind: .appScoped(.readOnly), service: Fixtures.service(engine))
         engine.addItem(at: "/A")
 
         let record = try await store.add(engine.grant("/A", origin: .openPanel), key: "a", metadata: Tag(name: "a"))
@@ -92,8 +92,8 @@ struct StoreAddTests {
     }
 
     @Test func defaultsToTheEnvironmentsKind() {
-        let iOSStore = TestStore(persistence: InMemoryPersistence(), bookmarks: Fixtures.bookmarks(Fixtures.engine(Fixtures.iOS)))
-        let directStore = TestStore(persistence: InMemoryPersistence(), bookmarks: Fixtures.bookmarks(Fixtures.engine(Fixtures.unsandboxedMac)))
+        let iOSStore = TestStore(persistence: InMemoryPersistence(), service: Fixtures.service(Fixtures.engine(Fixtures.iOS)))
+        let directStore = TestStore(persistence: InMemoryPersistence(), service: Fixtures.service(Fixtures.engine(Fixtures.unsandboxedMac)))
 
         #expect(iOSStore.kind == .implicit)
         #expect(directStore.kind == .reference)
@@ -209,7 +209,7 @@ struct StoreAddTests {
             harness.engine.failCreation(of: "/Users/me/A", with: FakeErrors.denied)
 
             let error = await #expect(throws: TestStore.Failure.self) {
-                try await harness.store.add(harness.engine.grant("/Users/me/A", origin: .drop), key: "a", metadata: Tag(name: "a"))
+                try await harness.store.add(harness.engine.grant("/Users/me/A", origin: .appKitDrop), key: "a", metadata: Tag(name: "a"))
             }
 
             #expect(error?.bookmarkFailure == .denied)

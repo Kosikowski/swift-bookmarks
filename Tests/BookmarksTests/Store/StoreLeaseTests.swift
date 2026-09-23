@@ -116,7 +116,7 @@ struct StoreLeaseTests {
             try await harness.store.lease("a").end()
             let data = try #require(try harness.store.record("a")).data
 
-            let resolved = try await harness.store.bookmarks.resolve(data)
+            let resolved = try await harness.store.service.resolve(data)
 
             #expect(!resolved.wasStale)
         }
@@ -274,7 +274,7 @@ struct StoreLeaseTests {
 
             let task = Task { try await store.lease("a") }
             await gate.waitUntilReached()
-            try harness.store.forget("a")
+            try await harness.store.forget("a")
             gate.open()
 
             let error = await #expect(throws: TestStore.Failure.self) { try await task.value }

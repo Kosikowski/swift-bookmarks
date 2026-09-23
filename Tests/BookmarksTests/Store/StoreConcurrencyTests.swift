@@ -25,7 +25,7 @@ struct StoreConcurrencyTests {
                             lease.end()
                         }
                     case 3:
-                        try? store.updateMetadata(key) { $0.name = "round \(round)" }
+                        try? await store.updateMetadata(key) { $0.name = "round \(round)" }
                     case 4:
                         engine.addItem(at: "/Regranted/\(key)")
                         _ = try? await store.regrant(key, with: engine.grant("/Regranted/\(key)", origin: .openPanel))
@@ -82,7 +82,7 @@ struct StoreConcurrencyTests {
                     }
                 }
                 group.addTask {
-                    _ = try? store.forget("k\(index)")
+                    _ = try? await store.forget("k\(index)")
                 }
             }
         }

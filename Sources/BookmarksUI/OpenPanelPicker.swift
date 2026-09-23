@@ -7,7 +7,7 @@ public enum OpenPanelPicker {
     /// Shows an open panel and returns the picked items, or an empty array when cancelled.
     ///
     /// The returned grants have access already started by the system. Adopt them with
-    /// ``Bookmarks/adopt(_:kind:relativeTo:includingResourceValuesFor:validators:context:)``
+    /// ``BookmarkService/adopt(_:kind:includingResourceValuesFor:validators:context:)``
     /// or ``BookmarkStore/add(_:key:metadata:)``, or relinquish them.
     public static func choose(_ configuration: PickerConfiguration, attachedTo window: NSWindow? = nil) async -> [Grant] {
         let panel = NSOpenPanel()
@@ -53,10 +53,11 @@ extension BookmarkStore {
         prompt: String? = nil,
         attachedTo window: NSWindow? = nil
     ) async throws(Failure) -> Record? {
+        try await load()
         guard let record = try record(key) else { throw .notFound(key) }
         let configuration = RegrantConfiguration.make(
             for: record,
-            recorded: bookmarks.recordedValues(in: record.data),
+            recorded: service.recordedValues(in: record.data),
             message: message,
             prompt: prompt
         )

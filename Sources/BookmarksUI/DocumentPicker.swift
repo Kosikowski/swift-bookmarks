@@ -14,7 +14,7 @@ public enum DocumentPicker {
         picker.allowsMultipleSelection = configuration.allowsMultipleSelection
         picker.directoryURL = configuration.directoryURL
         let urls = await withCheckedContinuation { continuation in
-            let delegate = PickerDelegate(continuation: continuation)
+            let delegate = PickerDelegate(result: PickerContinuation(continuation))
             picker.delegate = delegate
             objc_setAssociatedObject(picker, &PickerDelegate.key, delegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
             presenter.present(picker, animated: true)
@@ -27,20 +27,22 @@ public enum DocumentPicker {
 private final class PickerDelegate: NSObject, UIDocumentPickerDelegate {
     static var key: UInt8 = 0
 
-    private var continuation: CheckedContinuation<[URL], Never>?
+    private let result: PickerContinuation
 
-    init(continuation: CheckedContinuation<[URL], Never>) {
-        self.continuation = continuation
+    init(result: PickerContinuation) {
+        self.result = result
+    }
+
+    deinit {
+        result.resume(returning: [])
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        continuation?.resume(returning: urls)
-        continuation = nil
+        result.resume(returning: urls)
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        continuation?.resume(returning: [])
-        continuation = nil
+        result.resume(returning: [])
     }
 }
 #endif

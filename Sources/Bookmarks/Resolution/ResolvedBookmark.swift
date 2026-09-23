@@ -1,4 +1,4 @@
-public import Foundation
+import Foundation
 
 /// A bookmark that resolved successfully.
 ///
@@ -59,7 +59,5 @@ public final class ResolvedBookmark: Sendable {
         AccessLease(handle: handle)
     }
 
-    /// The resolved URL for callers that need it without access, such as display or
-    /// non-sandboxed builds. Prefer ``beginAccess()`` for file operations.
-    public var unscopedURL: URL { handle.url }
+    var url: URL { handle.url }
 }

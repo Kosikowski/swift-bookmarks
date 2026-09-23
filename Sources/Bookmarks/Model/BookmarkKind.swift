@@ -77,10 +77,14 @@ public enum BookmarkKind: Sendable, Hashable, Codable {
         if isSecurityScoped, !environment.supportsSecurityScope {
             return "Security-scoped bookmarks are only available on macOS and Mac Catalyst."
         }
-        if case .documentScoped = self, document == nil {
-            return "Document-scoped bookmarks need the URL of the document that anchors them."
+        switch (self, document) {
+        case (.documentScoped, .none):
+            return "Document-scoped bookmarks need the document that anchors them. Use DocumentBookmarks."
+        case (.documentScoped, .some), (_, .none):
+            return nil
+        case (_, .some):
+            return "Only document-scoped bookmarks are anchored on a document."
         }
-        return nil
     }
 }
 

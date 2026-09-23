@@ -6,6 +6,9 @@ public struct MigrationMarker: Sendable {
     private let markCompleteAction: @Sendable () -> Void
 
     /// Creates a marker from closures that read and set the completion flag.
+    ///
+    /// To rely on the clean-up alone, report completion when the legacy data is gone and do
+    /// nothing in `markComplete`.
     public init(isComplete: @escaping @Sendable () -> Bool, markComplete: @escaping @Sendable () -> Void) {
         isCompleteCheck = isComplete
         markCompleteAction = markComplete
@@ -18,9 +21,6 @@ public struct MigrationMarker: Sendable {
             markComplete: { defaults(suiteName)?.set(true, forKey: key) }
         )
     }
-
-    /// Keeps no flag and relies on the clean-up removing the legacy data.
-    public static let cleanUpOnly = MigrationMarker(isComplete: { false }, markComplete: {})
 
     /// Whether the migration has run.
     public var isComplete: Bool { isCompleteCheck() }
@@ -37,44 +37,40 @@ public struct MigrationMarker: Sendable {
 /// Imports records from a legacy source once, the first time the base persistence is empty.
 ///
 /// The legacy data is cleaned up only after the imported records were saved, so a failed
-/// import never loses the original. Pass a ``MigrationMarker`` that persists completion so a
-/// store the user later empties isn't filled again from legacy data that wasn't removed.
+/// import never loses the original. The marker keeps a store the user later empties from
+/// being filled again from legacy data.
 public struct MigratingPersistence<Base: BookmarkPersistence>: BookmarkPersistence {
     public typealias Key = Base.Key
     public typealias Metadata = Base.Metadata
 
     private let base: Base
+    private let marker: MigrationMarker
     private let legacy: @Sendable () throws(PersistenceError) -> [BookmarkRecord<Key, Metadata>]?
     private let cleanUp: @Sendable () -> Void
-    private let marker: MigrationMarker
 
     /// Creates a migrating persistence.
     ///
     /// - Parameters:
     ///   - base: Where records live from now on.
+    ///   - marker: Records that the migration ran. A failed legacy read leaves it unset.
     ///   - legacy: Reads records from the old location, or returns `nil` when there are none.
     ///   - cleanUp: Removes the old data. Runs once, after the imported records are saved.
-    ///   - marker: Records that the migration ran. A failed legacy read leaves it unset.
     public init(
         base: Base,
+        marker: MigrationMarker,
         legacy: @escaping @Sendable () throws(PersistenceError) -> [BookmarkRecord<Key, Metadata>]?,
-        cleanUp: @escaping @Sendable () -> Void = {},
-        marker: MigrationMarker = .cleanUpOnly
+        cleanUp: @escaping @Sendable () -> Void = {}
     ) {
         self.base = base
+        self.marker = marker
         self.legacy = legacy
         self.cleanUp = cleanUp
-        self.marker = marker
     }
 
     public func load() throws(PersistenceError) -> [BookmarkRecord<Key, Metadata>] {
         let current = try base.load()
         guard !marker.isComplete else { return current }
-        guard current.isEmpty else {
-            marker.markComplete()
-            return current
-        }
-        guard let imported = try legacy(), !imported.isEmpty else {
+        guard current.isEmpty, let imported = try legacy(), !imported.isEmpty else {
             marker.markComplete()
             return current
         }
