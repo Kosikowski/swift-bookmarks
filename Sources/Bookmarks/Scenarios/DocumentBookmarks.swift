@@ -16,8 +16,7 @@ public struct DocumentBookmarks: Sendable {
     /// The bookmark service.
     public let service: BookmarkService
 
-    /// Creates a helper for bookmarks anchored on `document`.
-    public init(document: URL, access: AccessMode = .readWrite, service: BookmarkService = BookmarkService()) {
+    init(document: URL, access: AccessMode, service: BookmarkService) {
         self.document = document
         self.access = access
         self.service = service

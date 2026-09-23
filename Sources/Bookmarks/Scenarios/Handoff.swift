@@ -12,8 +12,7 @@ public struct Handoff: Sendable {
     /// The bookmark service.
     public let service: BookmarkService
 
-    /// Creates a handoff helper.
-    public init(service: BookmarkService = BookmarkService()) {
+    init(service: BookmarkService) {
         self.service = service
     }
 

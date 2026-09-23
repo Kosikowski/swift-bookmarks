@@ -118,6 +118,21 @@ public struct BookmarkService: Sendable {
         engine.recordedValues(in: data)
     }
 
+    /// Document-scoped bookmarks to files referenced from `document`.
+    public func documents(anchoredOn document: URL, access: AccessMode = .readWrite) -> DocumentBookmarks {
+        DocumentBookmarks(document: document, access: access, service: self)
+    }
+
+    /// Finder alias files.
+    public var aliasFiles: AliasFiles {
+        AliasFiles(service: self)
+    }
+
+    /// Tokens that pass access to an XPC service or helper.
+    public var handoff: Handoff {
+        Handoff(service: self)
+    }
+
     /// Resolves the bookmark, holds access while `body` runs, and ends it afterwards.
     ///
     /// Refreshed bytes aren't reported. Use ``resolve(_:kind:policy:)`` when the caller

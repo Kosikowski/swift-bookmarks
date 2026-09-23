@@ -10,7 +10,7 @@ struct RegressionTests {
         let engine = Fixtures.engine()
         engine.addItem(at: "/Users/me/Report.pages", isDirectory: false)
         engine.addItem(at: "/Users/me/chart.png", isDirectory: false)
-        let documents = DocumentBookmarks(document: URL(filePath: "/Users/me/Report.pages"), service: Fixtures.service(engine))
+        let documents = Fixtures.service(engine).documents(anchoredOn: URL(filePath: "/Users/me/Report.pages"))
 
         _ = try await documents.create(for: engine.grant("/Users/me/chart.png", origin: .openPanel))
 
@@ -21,7 +21,7 @@ struct RegressionTests {
         let engine = Fixtures.engine()
         engine.addItem(at: "/Users/me/Report.pages", isDirectory: false)
         engine.addItem(at: "/Users/me/Folder")
-        let documents = DocumentBookmarks(document: URL(filePath: "/Users/me/Report.pages"), service: Fixtures.service(engine))
+        let documents = Fixtures.service(engine).documents(anchoredOn: URL(filePath: "/Users/me/Report.pages"))
 
         await #expect(throws: BookmarkError.self) {
             try await documents.create(for: engine.grant("/Users/me/Folder", origin: .appKitDrop))
@@ -35,7 +35,7 @@ struct RegressionTests {
         engine.addItem(at: "/Users/me/Target")
         engine.makeAccessibleWithoutGrant("/Users/me/Desktop")
 
-        try await AliasFiles(service: Fixtures.service(engine)).write(
+        try await Fixtures.service(engine).aliasFiles.write(
             aliasTo: engine.grant("/Users/me/Target", origin: .openPanel),
             at: URL(filePath: "/Users/me/Desktop/Target alias")
         )

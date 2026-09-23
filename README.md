@@ -63,9 +63,9 @@ Or conform your existing store to `BookmarkPersistence` and keep its format byte
 
 ## Other scenarios
 
-- `DocumentBookmarks`: document-scoped bookmarks to files referenced from a document. It's the only way to anchor a bookmark on a document.
-- `Handoff`: tokens that pass access to an XPC service or helper.
-- `AliasFiles`: Finder alias files.
+- `service.documents(anchoredOn:)`: document-scoped bookmarks to files referenced from a document. It's the only way to anchor a bookmark on a document.
+- `service.handoff`: tokens that pass access to an XPC service or helper.
+- `service.aliasFiles`: Finder alias files.
 - `VolumeEvents`: mount and unmount notifications (macOS).
 - `AccessRegistry.lease(covering:)`: reuse a folder's access for files inside it instead of starting one scope per file.
 

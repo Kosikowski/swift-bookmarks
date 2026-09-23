@@ -143,7 +143,7 @@ struct SystemEngineTests {
         let image = try sandbox.makeFile("Image.png", contents: "png")
 
         let error = await #expect(throws: BookmarkError.self) {
-            try await DocumentBookmarks(document: document, service: service).create(for: grant(image))
+            try await service.documents(anchoredOn: document).create(for: grant(image))
         }
 
         #expect(error?.failure == .denied)
@@ -178,7 +178,7 @@ struct SystemEngineTests {
         defer { sandbox.remove() }
         let target = try sandbox.makeDirectory("Target")
         let alias = sandbox.url("Target alias")
-        let aliases = AliasFiles(service: service)
+        let aliases = service.aliasFiles
 
         try await aliases.write(aliasTo: grant(target), at: alias)
         let resolved = try await aliases.resolve(aliasAt: alias)
@@ -192,7 +192,7 @@ struct SystemEngineTests {
         let folder = try sandbox.makeDirectory("Shared")
         let data = try await service.create(for: grant(folder), kind: .appScoped(.readWrite))
         let lease = try await service.resolve(data, kind: .appScoped(.readWrite)).beginAccess()
-        let handoff = Handoff(service: service)
+        let handoff = service.handoff
 
         let token = try await handoff.makeToken(for: lease)
         lease.end()

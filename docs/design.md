@@ -325,11 +325,11 @@ Save panels return URLs for files that don't exist yet; bookmark creation fails 
 ## 9. Scenarios
 
 ### 9.1 Document-scoped bookmarks (macOS)
-`DocumentBookmarks(document: URL)` creates and resolves `.documentScoped` bookmarks to files referenced from a document, and is the only API that takes a document anchor. It checks the rules it can up front (targets must be files; the anchor must be a file) and fails with `.unsupported` or `.refused`. A missing document-scope entitlement surfaces as `.denied`, the system's 256. The docs note that tools stripping extended attributes break these.
+`service.documents(anchoredOn:)` returns a `DocumentBookmarks` that creates and resolves `.documentScoped` bookmarks to files referenced from a document, and is the only API that takes a document anchor. It checks the rules it can up front (targets must be files; the anchor must be a file) and fails with `.unsupported` or `.refused`. A missing document-scope entitlement surfaces as `.denied`, the system's 256. The docs note that tools stripping extended attributes break these.
 
 ### 9.2 Handoff to helpers and extensions
-- `Handoff.makeToken(for lease: AccessLease) -> BookmarkData` creates an `.implicit` bookmark for sending to an XPC service or login item. It's a bearer token valid until reboot, so it's never persisted (R9).
-- `Handoff.receive(_ data:) -> AccessLease` resolves with implicit start and returns a lease that stops on end.
+- `service.handoff.makeToken(for lease: AccessLease) -> BookmarkData` creates an `.implicit` bookmark for sending to an XPC service or login item. It's a bearer token valid until reboot, so it's never persisted (R9).
+- `service.handoff.receive(_ data:) -> AccessLease` resolves with implicit start and returns a lease that stops on end.
 - With `NSXPCConnection`, sending the lease's `url` directly also carries scope; documented as the alternative.
 
 ### 9.3 Validators
@@ -344,7 +344,7 @@ Save panels return URLs for files that don't exist yet; bookmark creation fails 
 Validators return typed refusals; the app supplies the copy.
 
 ### 9.4 Aliases
-`AliasFile.write(for: URL, to: URL)` and `AliasFile.resolve(at: URL)`. No scope, per research §3.
+`service.aliasFiles.write(aliasTo:at:)` and `service.aliasFiles.resolve(aliasAt:)`. No scope, per research §3.
 
 ### 9.5 Environment awareness
 `SandboxEnvironment.current` reports sandboxed/unsandboxed and platform. When unsandboxed (direct-distribution builds, test runners), the default kind becomes `.reference` for move tracking only, and `didStartScope == false` is expected.
