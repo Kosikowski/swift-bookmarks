@@ -18,7 +18,7 @@ struct AccessRegistryTests {
     }
 
     func lease(_ key: String, _ url: URL, alreadyStarted: Bool = false) -> AccessLease {
-        registry.lease(for: key, handle: ScopeHandle(url: url, engine: engine, alreadyStarted: alreadyStarted))
+        registry.lease(for: key, url: url) { alreadyStarted }
     }
 
     @Test func startsOncePerKey() {
@@ -48,17 +48,25 @@ struct AccessRegistryTests {
         #expect(engine.isBalanced)
     }
 
-    @Test func balancesASystemStartedURLThatIsNotNeeded() {
-        let url = issue("/A")
-        engine.addItem(at: "/Panel")
-        let grant = engine.grant("/Panel", origin: .openPanel)
+    @Test func leavesAnUnusedStartWithItsResolvedBookmarkWhenTheKeyIsActive() async throws {
+        let engine = Fixtures.engine(Fixtures.iOS)
+        let registry = AccessRegistry<String>(engine: engine)
+        engine.addItem(at: "/Documents/Folder")
+        let service = Fixtures.service(engine)
+        let data = try await service.create(for: engine.grant("/Documents/Folder", origin: .documentPicker))
+        let implicitStart = ResolutionPolicy(startsImplicitAccess: true)
+        let first = registry.lease(for: "a", resolved: try await service.resolve(data, policy: implicitStart))
 
-        let first = lease("a", url)
-        let second = lease("a", grant.url, alreadyStarted: true)
+        do {
+            let late = try await service.resolve(data, policy: implicitStart)
+            let shared = registry.lease(for: "a", resolved: late)
+            #expect(shared.url == first.url)
+            #expect(engine.outstandingAccess["/Documents/Folder"] == 2)
+            shared.end()
+        }
 
-        #expect(!engine.isAccessing("/Panel"))
+        #expect(engine.outstandingAccess["/Documents/Folder"] == 1)
         first.end()
-        second.end()
         #expect(engine.isBalanced)
     }
 
@@ -73,7 +81,7 @@ struct AccessRegistryTests {
         #expect(engine.isBalanced)
     }
 
-    @Test func leasesAResolvedBookmarkAndSharesItsStart() async throws {
+    @Test func leasesAResolvedBookmarkWithItsOwnScope() async throws {
         let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
         let resolved = try await Fixtures.service(engine).resolve(data)
 
@@ -81,12 +89,44 @@ struct AccessRegistryTests {
         let direct = resolved.beginAccess()
 
         #expect(registered.url == direct.url)
-        #expect(engine.calls.starts == 1)
         registered.end()
-        #expect(engine.isAccessing("/Users/me/Folder"))
+        #expect(registry.activeKeys.isEmpty)
+        #expect(direct.isActive)
         direct.end()
         #expect(engine.isBalanced)
+    }
+
+    @Test func oneResolvedBookmarkCanBackSeveralKeys() async throws {
+        let data = try await Fixtures.adoptFolder("/Users/me/Folder", engine: engine)
+        let resolved = try await Fixtures.service(engine).resolve(data)
+
+        let first = registry.lease(for: "first", resolved: resolved)
+        let second = registry.lease(for: "second", resolved: resolved)
+        #expect(registry.activeKeys == ["first", "second"])
+
+        first.end()
+        #expect(registry.activeKeys == ["second"])
+        second.end()
         #expect(registry.activeKeys.isEmpty)
+        #expect(engine.isBalanced)
+    }
+
+    @Test func takesOverAnUnusedImplicitStart() async throws {
+        let engine = Fixtures.engine(Fixtures.iOS)
+        let registry = AccessRegistry<String>(engine: engine)
+        engine.addItem(at: "/Documents/Folder")
+        let service = Fixtures.service(engine)
+        let data = try await service.create(for: engine.grant("/Documents/Folder", origin: .documentPicker))
+        let resolved = try await service.resolve(data, policy: ResolutionPolicy(startsImplicitAccess: true))
+        let startsAfterResolution = engine.calls.starts
+
+        let lease = registry.lease(for: "folder", resolved: resolved)
+        let second = registry.lease(for: "other", resolved: resolved)
+
+        #expect(engine.calls.starts == startsAfterResolution + 1)
+        lease.end()
+        second.end()
+        #expect(engine.isBalanced)
     }
 
     @Test func activeLeaseOnlyExistsWhileLeased() {
@@ -204,7 +244,7 @@ struct AccessRegistryTests {
         await withTaskGroup(of: Void.self) { group in
             for index in 0..<200 {
                 group.addTask {
-                    let lease = registry.lease(for: "\(index % 10)", handle: ScopeHandle(url: urls[index % 10], engine: engine))
+                    let lease = registry.lease(for: "\(index % 10)", url: urls[index % 10])
                     await Task.yield()
                     lease.end()
                 }
@@ -224,7 +264,7 @@ struct AccessRegistrySoftLimitTests {
         let leases = (0..<count).map { index -> AccessLease in
             engine.addItem(at: "/Items/\(index)")
             let url = engine.grant("/Items/\(index)", origin: .fileImporter).url
-            return registry.lease(for: index, handle: ScopeHandle(url: url, engine: engine))
+            return registry.lease(for: index, url: url)
         }
         return (engine, registry, leases)
     }

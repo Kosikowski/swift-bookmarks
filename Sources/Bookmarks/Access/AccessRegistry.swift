@@ -34,16 +34,18 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
     /// is one.
     ///
     /// When `key` is already active, `resolved` isn't used, so the system start isn't repeated.
+    /// An unused implicit start taken during resolution moves to the registry, so it's
+    /// balanced by the registry's leases.
     public func lease(for key: Key, resolved: ResolvedBookmark) -> AccessLease {
-        lease(for: key, handle: resolved.handle)
+        lease(for: key, url: resolved.url) { resolved.handle.transferUnusedStart() }
     }
 
-    func lease(for key: Key, handle: ScopeHandle) -> AccessLease {
+    func lease(for key: Key, url: URL, alreadyStarted: () -> Bool = { false }) -> AccessLease {
         let lease = handles.withLock { handles in
             if let active = handles[key], !active.isIdle {
                 return AccessLease(handle: active)
             }
-            handle.onIdle { [weak self] idle in
+            let handle = ScopeHandle(url: url, engine: engine, alreadyStarted: alreadyStarted()) { [weak self] idle in
                 self?.remove(idle, for: key)
             }
             handles[key] = handle

@@ -269,11 +269,13 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
         for _ in 0..<3 {
             let snapshot = try snapshot(key)
             let resolved = try await resolve(snapshot)
-            let access = resolved.beginAccess()
-            defer { access.end() }
-            let identity = await identity(of: access.url)
-            guard await commit(resolved, identity: identity, for: snapshot) else { continue }
+            guard table.isCurrent(snapshot) else { continue }
             let lease = registry.lease(for: key, resolved: resolved)
+            let identity = await identity(of: lease.url)
+            guard await commit(resolved, identity: identity, for: snapshot) else {
+                lease.end()
+                continue
+            }
             await touch(key)
             return lease
         }

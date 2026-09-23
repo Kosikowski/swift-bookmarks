@@ -17,13 +17,19 @@ final class ScopeHandle: Sendable {
     let url: URL
     private let engine: any BookmarkEngine
     private let state: Mutex<State>
-    private let idleHandler = Mutex<(@Sendable (ScopeHandle) -> Void)?>(nil)
+    private let onIdle: (@Sendable (ScopeHandle) -> Void)?
 
     /// - Parameter alreadyStarted: The URL arrived with access already started by the system,
     ///   so the first acquisition takes ownership of that start instead of starting again.
-    init(url: URL, engine: any BookmarkEngine, alreadyStarted: Bool = false) {
+    init(
+        url: URL,
+        engine: any BookmarkEngine,
+        alreadyStarted: Bool = false,
+        onIdle: (@Sendable (ScopeHandle) -> Void)? = nil
+    ) {
         self.url = url
         self.engine = engine
+        self.onIdle = onIdle
         state = Mutex(State(adoptsSystemStart: alreadyStarted))
     }
 
@@ -35,8 +41,13 @@ final class ScopeHandle: Sendable {
         }
     }
 
-    func onIdle(_ handler: @escaping @Sendable (ScopeHandle) -> Void) {
-        idleHandler.withLock { $0 = handler }
+    /// Gives up a system start that no lease has taken over, so another handle can own it.
+    func transferUnusedStart() -> Bool {
+        state.withLock { state in
+            guard state.holders == 0, state.adoptsSystemStart else { return false }
+            state.adoptsSystemStart = false
+            return true
+        }
     }
 
     func acquire() -> Acquisition {
@@ -63,7 +74,7 @@ final class ScopeHandle: Sendable {
             return true
         }
         if becameIdle {
-            idleHandler.withLock { $0 }?(self)
+            onIdle?(self)
         }
     }
 
