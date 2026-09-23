@@ -1,7 +1,5 @@
 import Synchronization
 
-/// Shares one in-flight operation between concurrent callers with the same key.
-///
 /// A cancelled caller stops waiting immediately; the shared operation keeps running for the
 /// other callers.
 final class SingleFlight<Key: Hashable & Sendable, Value: Sendable>: Sendable {

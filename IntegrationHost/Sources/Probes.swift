@@ -1,7 +1,6 @@
 import Bookmarks
 import Foundation
 
-/// One observation made in the sandbox.
 struct ProbeResult: Identifiable, Sendable {
     let id = UUID()
     let probe: String

@@ -1,6 +1,5 @@
 import Foundation
 
-/// Maps system errors to ``BookmarkFailure`` using the error and what the bookmark recorded.
 struct FailureClassifier: Sendable {
     let itemExists: @Sendable (String) -> Bool
 

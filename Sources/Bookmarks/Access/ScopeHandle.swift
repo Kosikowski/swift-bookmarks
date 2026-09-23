@@ -1,10 +1,6 @@
 import Foundation
 import Synchronization
 
-/// Owns one resolved URL instance and balances the system start and stop calls for it.
-///
-/// The first holder starts access, the last one stops it. A handle that becomes idle can be
-/// acquired again, which starts access again.
 final class ScopeHandle: Sendable {
     struct Acquisition {
         let didStart: Bool
