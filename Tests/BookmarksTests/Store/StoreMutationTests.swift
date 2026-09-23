@@ -24,7 +24,7 @@ struct StoreMutationTests {
 
         @Test func forgettingAnUnknownKeyChangesNothing() async throws {
             #expect(try await !harness.store.forget("nope"))
-            #expect(harness.persistence.base.saveCount == 0)
+            #expect(harness.persistence.saveCount == 0)
         }
 
         @Test func activeLeasesSurviveButNewOnesFail() async throws {

@@ -365,7 +365,7 @@ Validators return typed refusals; the app supplies the copy.
 
 - `FakeBookmarkEngine`: bookmark bytes are the path; scriptable stale, failure per path, hangs with gates, sandboxed/unsandboxed mode. It only accepts `start` on URLs it issued from `resolve` or intake, and records every start and stop.
 - `engine.isBalanced` and `engine.balanceReport` show whether every start has one stop; the report describes outstanding starts, unbalanced stops and starts on unissued URLs, so `#expect(engine.isBalanced, "\(engine.balanceReport)")` fails readably. The package doesn't import `Testing`.
-- `engine.grant(_:origin:)` stands in for pickers in UI-flow tests; `InMemoryPersistence` for stores.
+- `engine.grant(_:origin:)` stands in for pickers in UI-flow tests. `InMemoryPersistence` backs previews; `ScriptedPersistence` fails loads and saves on request and can replace its records as another process would.
 
 `IntegrationHost` is a sandboxed macOS app (and an iOS app) with a scenario runner. It exists to answer, on real signed builds, the questions the research couldn't verify:
 

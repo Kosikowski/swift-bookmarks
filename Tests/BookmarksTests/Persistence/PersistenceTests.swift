@@ -1,4 +1,5 @@
 @testable import Bookmarks
+import BookmarksTesting
 import Foundation
 import Synchronization
 import Testing

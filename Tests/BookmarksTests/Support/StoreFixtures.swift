@@ -24,47 +24,6 @@ final class TestClock: Sendable {
     }
 }
 
-final class ScriptedPersistence<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: BookmarkPersistence {
-    let base: InMemoryPersistence<Key, Metadata>
-    private let failures = Mutex((load: 0, save: 0))
-    private let loads = Atomic(0)
-
-    var loadCount: Int { loads.load(ordering: .relaxed) }
-
-    init(records: [BookmarkRecord<Key, Metadata>] = []) {
-        base = InMemoryPersistence(records: records)
-    }
-
-    func failLoads(_ count: Int) {
-        failures.withLock { $0.load = count }
-    }
-
-    func failSaves(_ count: Int) {
-        failures.withLock { $0.save = count }
-    }
-
-    func load() throws(PersistenceError) -> [BookmarkRecord<Key, Metadata>] {
-        loads.add(1, ordering: .relaxed)
-        let fail = failures.withLock { state -> Bool in
-            guard state.load > 0 else { return false }
-            state.load -= 1
-            return true
-        }
-        if fail { throw PersistenceError(.readFailed) }
-        return try base.load()
-    }
-
-    func save(_ records: [BookmarkRecord<Key, Metadata>]) throws(PersistenceError) {
-        let fail = failures.withLock { state -> Bool in
-            guard state.save > 0 else { return false }
-            state.save -= 1
-            return true
-        }
-        if fail { throw PersistenceError(.writeFailed) }
-        try base.save(records)
-    }
-}
-
 struct StoreHarness {
     let engine: FakeBookmarkEngine
     let persistence: ScriptedPersistence<String, Tag>
@@ -87,7 +46,7 @@ struct StoreHarness {
         )
     }
 
-    var saved: [TestRecord] { persistence.base.storedRecords }
+    var saved: [TestRecord] { persistence.storedRecords }
 
     func grant(_ path: String, origin: Grant.Origin = .openPanel, isDirectory: Bool = true) -> Grant {
         engine.addItem(at: path, isDirectory: isDirectory)

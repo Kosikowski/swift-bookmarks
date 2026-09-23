@@ -161,11 +161,11 @@ struct StoreLeaseTests {
         @Test func unchangedRecordsAreNotSavedAgain() async throws {
             try await harness.add("a", "/Users/me/A")
             try await harness.store.lease("a").end()
-            let saves = harness.persistence.base.saveCount
+            let saves = harness.persistence.saveCount
 
             try await harness.store.lease("a").end()
 
-            #expect(harness.persistence.base.saveCount == saves)
+            #expect(harness.persistence.saveCount == saves)
         }
     }
 
@@ -192,13 +192,13 @@ struct StoreLeaseTests {
             harness.engine.removeItem(at: "/Users/me/A")
             _ = try? await harness.store.lease("a")
             let firstFailure = harness.clock.now
-            let saves = harness.persistence.base.saveCount
+            let saves = harness.persistence.saveCount
             harness.clock.advance(by: 100)
 
             _ = try? await harness.store.lease("a")
 
             #expect(try await harness.store.record("a")?.status == .unavailable(.missing, since: firstFailure))
-            #expect(harness.persistence.base.saveCount == saves)
+            #expect(harness.persistence.saveCount == saves)
         }
 
         @Test func missingItemsCanBeDropped() async throws {

@@ -51,7 +51,7 @@ struct StoreLoadingTests {
             let harness = StoreHarness(records: [StoreLoadingTests.record("kept"), StoreLoadingTests.record("removed"), StoreLoadingTests.record("retagged")])
             try await harness.store.load()
             let changes = try await harness.store.updates()
-            try harness.persistence.base.save([
+            harness.persistence.replaceStoredRecords([
                 StoreLoadingTests.record("kept"),
                 StoreLoadingTests.record("retagged", tag: "new"),
                 StoreLoadingTests.record("added"),
@@ -79,7 +79,7 @@ struct StoreLoadingTests {
             harness.engine.addItem(at: "/Users/me/B")
             var replaced = original
             replaced.data = try await Fixtures.adoptFolder("/Users/me/B", engine: harness.engine)
-            try harness.persistence.base.save([replaced])
+            harness.persistence.replaceStoredRecords([replaced])
 
             try await harness.store.reload()
 
@@ -95,7 +95,7 @@ struct StoreLoadingTests {
         @Test func failuresLeaveTheRecordsAsTheyWere() async throws {
             let harness = StoreHarness(records: [StoreLoadingTests.record("a")])
             try await harness.store.load()
-            try harness.persistence.base.save([])
+            harness.persistence.replaceStoredRecords([])
             harness.persistence.failLoads(1)
 
             await #expect(throws: TestStore.Failure.self) { try await harness.store.reload() }

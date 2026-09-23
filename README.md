@@ -10,7 +10,7 @@ Swift 6, macOS 15 / iOS 18 / visionOS 2 / Mac Catalyst 18.
 |---|---|
 | `Bookmarks` | Creating, resolving and storing bookmarks; access leases |
 | `BookmarksUI` | Open panel, document picker, SwiftUI importer and drop, re-grant flow |
-| `BookmarksTesting` | `FakeBookmarkEngine` for app tests: simulated file system, sandbox rules, access accounting |
+| `BookmarksTesting` | `FakeBookmarkEngine` for app tests: simulated file system, sandbox rules, access accounting; `ScriptedPersistence` for storage failures |
 
 ## Storing folders the user picked
 
