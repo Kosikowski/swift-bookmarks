@@ -39,6 +39,9 @@ public protocol BookmarkEngine: Sendable {
     /// The item's path-independent identity, when the volume reports one.
     func fileIdentity(of url: URL) -> FileIdentity?
 
+    /// Describes the item at `url`, or `nil` when it can't be inspected.
+    func itemInfo(at url: URL) -> ItemInfo?
+
     /// Writes alias-file bookmark bytes to `url`.
     func writeAliasFile(_ data: BookmarkData, to url: URL) throws
 

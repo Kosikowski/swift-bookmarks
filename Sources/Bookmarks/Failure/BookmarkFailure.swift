@@ -13,6 +13,8 @@ public enum BookmarkFailure: Sendable, Hashable, Codable {
     case denied
     /// The bookmark bytes are unreadable.
     case corrupt
+    /// A validator refused the granted item.
+    case refused(GrantRefusal)
     /// The operation isn't possible with this kind, platform or entitlement set.
     case unsupported(reason: String)
     /// The system didn't answer in time. The item may still be reachable later.
@@ -37,7 +39,7 @@ public enum BookmarkFailure: Sendable, Hashable, Codable {
         switch self {
         case .volumeUnavailable, .timedOut, .cancelled, .other:
             .retryLater
-        case .needsRegrant, .denied, .corrupt, .unsupported:
+        case .needsRegrant, .denied, .corrupt, .refused, .unsupported:
             .regrant
         case .missing:
             .forget

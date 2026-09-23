@@ -4,6 +4,7 @@ import Foundation
 struct FakeItem: Sendable {
     let id: UInt64
     var isDirectory: Bool
+    var linkTarget: String?
 }
 
 struct ScriptedFailure: Sendable {
@@ -59,6 +60,15 @@ struct FakeFileSystem: Sendable {
         items[path]?.isDirectory ?? false
     }
 
+    func canonicalPath(_ path: String) -> String {
+        var resolved = "/"
+        for component in path.split(separator: "/", omittingEmptySubsequences: true) {
+            let next = resolved == "/" ? "/\(component)" : "\(resolved)/\(component)"
+            resolved = items[next]?.linkTarget.map(canonicalPath) ?? next
+        }
+        return resolved
+    }
+
     func path(ofItem id: UInt64) -> String? {
         items.first { $0.value.id == id && mountedVolumes.contains(Self.volume(of: $0.key)) }?.key
     }
@@ -78,6 +88,12 @@ struct FakeFileSystem: Sendable {
             items[path] = FakeItem(id: nextItemID, isDirectory: isDirectory)
             nextItemID += 1
         }
+    }
+
+    mutating func addSymbolicLink(at path: String, to target: String) {
+        addItem(at: path, isDirectory: false)
+        items[path]?.linkTarget = target
+        items[path]?.isDirectory = false
     }
 
     mutating func removeItem(at path: String) {

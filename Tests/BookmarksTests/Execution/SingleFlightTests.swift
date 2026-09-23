@@ -75,6 +75,25 @@ struct SingleFlightTests {
         await #expect(throws: Failure.self) { try await second.value }
         #expect(flight.inFlightCount == 0)
     }
+
+    @Test func cancelledCallersStopWaitingWhileOthersGetTheValue() async throws {
+        let flight = SingleFlight<String, Int>()
+        let gate = AsyncGate()
+
+        let cancelled = Task {
+            try await flight.run("key") {
+                await gate.wait()
+                return 5
+            }
+        }
+        await gate.waitForWaiter()
+        let patient = Task { try await flight.run("key") { 0 } }
+        cancelled.cancel()
+
+        await #expect(throws: CancellationError.self) { try await cancelled.value }
+        gate.open()
+        #expect(try await patient.value == 5)
+    }
 }
 
 final class AsyncGate: Sendable {

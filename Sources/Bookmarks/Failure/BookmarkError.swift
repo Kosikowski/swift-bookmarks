@@ -46,6 +46,8 @@ extension BookmarkError: LocalizedError {
             "The system denied access to the item."
         case .corrupt:
             "The saved reference to the item is damaged."
+        case .refused(let refusal):
+            refusal.message
         case .unsupported(let reason):
             reason
         case .timedOut:

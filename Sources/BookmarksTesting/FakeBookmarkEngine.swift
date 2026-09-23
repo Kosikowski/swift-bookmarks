@@ -28,6 +28,11 @@ public final class FakeBookmarkEngine: BookmarkEngine, Sendable {
         return URL(filePath: path, directoryHint: isDirectory ? .isDirectory : .notDirectory)
     }
 
+    /// Adds a symbolic link at `path` that points to `target`.
+    public func addSymbolicLink(at path: String, pointingTo target: String) {
+        state.withLock { $0.addSymbolicLink(at: path, to: target) }
+    }
+
     /// Removes an item and everything inside it.
     public func removeItem(at path: String) {
         state.withLock { $0.removeItem(at: path) }
@@ -308,6 +313,19 @@ public final class FakeBookmarkEngine: BookmarkEngine, Sendable {
             state.item(at: path).map {
                 FileIdentity(volumeUUID: FakeFileSystem.volume(of: path), fileID: $0.id)
             }
+        }
+    }
+
+    public func itemInfo(at url: URL) -> ItemInfo? {
+        let path = url.fakePath
+        return state.withLock { state in
+            guard let item = state.item(at: path) else { return nil }
+            let canonical = state.canonicalPath(path)
+            return ItemInfo(
+                isDirectory: item.linkTarget == nil ? item.isDirectory : state.isDirectory(canonical),
+                isSymbolicLink: item.linkTarget != nil,
+                canonicalPath: canonical
+            )
         }
     }
 

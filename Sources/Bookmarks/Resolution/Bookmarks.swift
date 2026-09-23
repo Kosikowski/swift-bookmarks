@@ -69,11 +69,16 @@ public struct Bookmarks: Sendable {
     /// This is the recommended way to take in a URL from a panel, importer, picker or drop:
     /// from then on, only the resolved bookmark is used. The grant is relinquished whether or
     /// not adoption succeeds.
+    ///
+    /// Validators run while access to the item is held, before the bookmark is created. A
+    /// refusal fails with ``BookmarkFailure/refused(_:)``.
     public func adopt(
         _ grant: Grant,
         kind: BookmarkKind? = nil,
         relativeTo document: URL? = nil,
-        includingResourceValuesFor keys: Set<URLResourceKey> = []
+        includingResourceValuesFor keys: Set<URLResourceKey> = [],
+        validators: [any GrantValidator] = [],
+        context: ValidationContext = ValidationContext()
     ) async throws(BookmarkError) -> ResolvedBookmark {
         let kind = kind ?? defaultKind
         do {
@@ -98,7 +103,8 @@ public struct Bookmarks: Sendable {
                 keys: keys,
                 engine: engine,
                 classifier: classifier,
-                platform: platform
+                platform: platform,
+                validation: validators.isEmpty ? nil : Validation(validators: validators, context: context)
             )
         }
         let resolved = try await resolve(created.data, kind: kind, relativeTo: document)
@@ -199,6 +205,22 @@ public struct Bookmarks: Sendable {
 }
 
 extension Bookmarks {
+    struct Validation: Sendable {
+        let validators: [any GrantValidator]
+        let context: ValidationContext
+
+        func check(_ url: URL, engine: any BookmarkEngine) throws(BookmarkError) {
+            guard let info = engine.itemInfo(at: url) else {
+                throw BookmarkError(.refused(.uninspectable(path: url.path(percentEncoded: false))))
+            }
+            for validator in validators {
+                if let refusal = validator.refusal(for: info, at: url, in: context) {
+                    throw BookmarkError(.refused(refusal), lastKnownPath: info.canonicalPath)
+                }
+            }
+        }
+    }
+
     struct Created: Sendable {
         let data: BookmarkData
         let identity: FileIdentity?
@@ -237,7 +259,8 @@ extension Bookmarks {
         keys: Set<URLResourceKey>,
         engine: any BookmarkEngine,
         classifier: FailureClassifier,
-        platform: SandboxEnvironment.Platform
+        platform: SandboxEnvironment.Platform,
+        validation: Validation? = nil
     ) throws(BookmarkError) -> Created {
         let needsStart = !grant.isStartedBySystem(on: platform) && grant.origin != .alreadyAccessible
         let started = needsStart && engine.startAccessing(grant.url)
@@ -246,6 +269,7 @@ extension Bookmarks {
                 engine.stopAccessing(grant.url)
             }
         }
+        try validation?.check(grant.url, engine: engine)
         do {
             let data = try engine.makeBookmark(
                 for: grant.url,

@@ -75,6 +75,17 @@ public struct SystemBookmarkEngine: BookmarkEngine {
         return FileIdentity(volumeUUID: values.volumeUUIDString, fileID: fileID)
     }
 
+    public func itemInfo(at url: URL) -> ItemInfo? {
+        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else {
+            return nil
+        }
+        return ItemInfo(
+            isDirectory: values.isDirectory ?? false,
+            isSymbolicLink: values.isSymbolicLink ?? false,
+            canonicalPath: url.resolvingSymlinksInPath().path(percentEncoded: false).trimmingTrailingSlash
+        )
+    }
+
     public func writeAliasFile(_ data: BookmarkData, to url: URL) throws {
         try URL.writeBookmarkData(data.rawValue, to: url)
     }

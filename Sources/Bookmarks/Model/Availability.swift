@@ -20,7 +20,7 @@ public enum Availability: Sendable, Hashable {
             self = .volumeUnavailable(name: name)
         case .needsRegrant, .denied, .corrupt:
             self = .needsRegrant
-        case .unsupported, .timedOut, .cancelled, .other:
+        case .refused, .unsupported, .timedOut, .cancelled, .other:
             self = .unknown
         }
     }
