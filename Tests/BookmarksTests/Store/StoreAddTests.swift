@@ -19,7 +19,7 @@ struct StoreAddTests {
         #expect(record.createdAt == harness.clock.now)
         #expect(record.refreshedAt == nil)
         #expect(record.fileIdentity != nil)
-        #expect(try harness.store.records() == [record])
+        #expect(try await harness.store.records() == [record])
         #expect(harness.saved == [record])
         #expect(harness.engine.isBalanced)
     }
@@ -42,7 +42,7 @@ struct StoreAddTests {
         #expect(second.refreshedAt == harness.clock.now)
         #expect(second.lastKnownPath == "/Users/me/B")
         #expect(second.metadata.name == "B")
-        #expect(try harness.store.keys() == ["a"])
+        #expect(try await harness.store.keys() == ["a"])
     }
 
     @Test func keepsInsertionOrder() async throws {
@@ -50,7 +50,7 @@ struct StoreAddTests {
         try await harness.add("a", "/A")
         try await harness.add("b", "/B")
 
-        #expect(try harness.store.keys() == ["c", "a", "b"])
+        #expect(try await harness.store.keys() == ["c", "a", "b"])
         #expect(harness.saved.map(\.key) == ["c", "a", "b"])
     }
 
@@ -67,7 +67,7 @@ struct StoreAddTests {
         let second = try await store.add(engine.grant("/B", origin: .openPanel), metadata: NoMetadata())
 
         #expect(first.key != second.key)
-        #expect(try store.records().count == 2)
+        #expect(try await store.records().count == 2)
     }
 
     @Test func noMetadataConvenienceWithAKey() async throws {
@@ -113,7 +113,7 @@ struct StoreAddTests {
                 Issue.record("Expected duplicate of a, got \(String(describing: error))")
                 return
             }
-            #expect(try harness.store.keys() == ["a"])
+            #expect(try await harness.store.keys() == ["a"])
             #expect(harness.engine.isBalanced)
         }
 
@@ -150,7 +150,7 @@ struct StoreAddTests {
             let returned = try await harness.add("b", "/Users/me/A")
 
             #expect(returned == original)
-            #expect(try harness.store.keys() == ["a"])
+            #expect(try await harness.store.keys() == ["a"])
             #expect(harness.engine.isBalanced)
         }
 
@@ -160,7 +160,7 @@ struct StoreAddTests {
             try await harness.add("a", "/Users/me/A")
             try await harness.add("b", "/Users/me/A")
 
-            #expect(try harness.store.keys() == ["a", "b"])
+            #expect(try await harness.store.keys() == ["a", "b"])
         }
 
         @Test func replacingTheSameKeyIsNotADuplicate() async throws {
@@ -169,7 +169,7 @@ struct StoreAddTests {
 
             try await harness.add("a", "/Users/me/A")
 
-            #expect(try harness.store.keys() == ["a"])
+            #expect(try await harness.store.keys() == ["a"])
         }
     }
 
@@ -183,7 +183,7 @@ struct StoreAddTests {
             }
 
             #expect(error?.bookmarkFailure == .refused(.notFile(path: "/Users/me/Folder")))
-            #expect(try harness.store.records().isEmpty)
+            #expect(try await harness.store.records().isEmpty)
             #expect(harness.engine.isBalanced)
         }
 
@@ -229,7 +229,7 @@ struct StoreAddTests {
                 return
             }
             #expect(persistenceError.reason == .writeFailed)
-            #expect(try harness.store.records().isEmpty)
+            #expect(try await harness.store.records().isEmpty)
             #expect(harness.engine.isBalanced)
         }
 
@@ -237,9 +237,9 @@ struct StoreAddTests {
             let harness = StoreHarness()
             harness.persistence.failLoads(1)
 
-            #expect(throws: TestStore.Failure.self) { try harness.store.records() }
+            await #expect(throws: TestStore.Failure.self) { try await harness.store.records() }
 
-            #expect(try harness.store.records().isEmpty)
+            #expect(try await harness.store.records().isEmpty)
         }
 
         @Test func aFailedLoadRelinquishesTheGrant() async {

@@ -16,7 +16,7 @@ struct StoreFailurePathTests {
         }
 
         #expect(error?.bookmarkFailure == .denied)
-        #expect(try harness.store.record("a") == original)
+        #expect(try await harness.store.record("a") == original)
         #expect(harness.engine.isBalanced)
     }
 
@@ -29,7 +29,7 @@ struct StoreFailurePathTests {
         let error = await #expect(throws: TestStore.Failure.self) { try await harness.store.lease("a") }
 
         #expect(error?.bookmarkFailure == .missing)
-        #expect(try harness.store.record("a")?.status == .available)
+        #expect(try await harness.store.record("a")?.status == .available)
     }
 
     @Test func forgettingDuringAFailingResolutionIsNotUndone() async throws {
@@ -45,7 +45,7 @@ struct StoreFailurePathTests {
         gate.open()
 
         await #expect(throws: TestStore.Failure.self) { try await task.value }
-        #expect(try store.record("a") == nil)
+        #expect(try await store.record("a") == nil)
         #expect(harness.saved.isEmpty)
     }
 
@@ -63,7 +63,7 @@ struct StoreFailurePathTests {
         let harness = StoreHarness(records: records)
 
         #expect(try await harness.store.refreshStatuses().isEmpty)
-        #expect(try harness.store.record("old")?.status.failure == .corrupt)
+        #expect(try await harness.store.record("old")?.status.failure == .corrupt)
     }
 }
 

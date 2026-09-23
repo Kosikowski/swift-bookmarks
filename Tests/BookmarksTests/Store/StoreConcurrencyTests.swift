@@ -37,9 +37,9 @@ struct StoreConcurrencyTests {
         }
 
         #expect(engine.isBalanced)
-        #expect(try store.keys() == keys)
+        #expect(try await store.keys() == keys)
         #expect(harness.saved.map(\.key) == keys)
-        #expect(try store.records().map(\.data) == harness.saved.map(\.data))
+        #expect(try await store.records().map(\.data) == harness.saved.map(\.data))
         #expect(store.registry.activeKeys.isEmpty)
     }
 
@@ -61,7 +61,7 @@ struct StoreConcurrencyTests {
         }
 
         #expect(keys.count == 1)
-        #expect(try store.records().count == 1)
+        #expect(try await store.records().count == 1)
         #expect(harness.engine.isBalanced)
     }
 
@@ -88,6 +88,6 @@ struct StoreConcurrencyTests {
         }
 
         #expect(harness.engine.isBalanced)
-        #expect(try store.records().isEmpty)
+        #expect(try await store.records().isEmpty)
     }
 }

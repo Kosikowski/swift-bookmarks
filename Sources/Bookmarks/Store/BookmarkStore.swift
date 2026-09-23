@@ -8,27 +8,27 @@ import Synchronization
 /// or re-granted. Records that fail to resolve are kept and marked unavailable unless the
 /// ``StorePolicy/failureHandling`` says otherwise, and every write includes them.
 ///
-/// The store is safe to use from any thread. Reads are synchronous and never wait for a save.
-/// Changes are `async`: they are serialised, and persistence and system calls run on the
-/// bookmark executor. The first read loads the records synchronously unless ``load()`` ran
-/// before it, so call ``load()`` at launch to keep that I/O off the main thread.
-public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: Sendable {
+/// Changes are serialised, and persistence and system calls run on the bookmark executor, so
+/// nothing blocks the caller. Reads never wait for a save in progress. Records load on first
+/// use; call ``load()`` to load them earlier.
+public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable> {
     public typealias Record = BookmarkRecord<Key, Metadata>
     public typealias Failure = BookmarkStoreError<Key>
     typealias Table = RecordTable<Key, Metadata>
 
     /// The bookmark service the store uses.
-    public let service: BookmarkService
+    public nonisolated let service: BookmarkService
     /// The kind new bookmarks are created with.
-    public let kind: BookmarkKind
+    public nonisolated let kind: BookmarkKind
     /// How the store behaves.
-    public let policy: StorePolicy
+    public nonisolated let policy: StorePolicy
     /// The registry that balances access for the store's keys.
-    public let registry: AccessRegistry<Key>
+    public nonisolated let registry: AccessRegistry<Key>
 
     private let persistence: any BookmarkPersistence<Key, Metadata>
-    private let table = Mutex(Table())
-    private let isLoaded = Mutex(false)
+    private var table = Table()
+    private var isLoaded = false
+    private var loading: Task<Result<[Record], PersistenceError>, Never>?
     private let writes = AsyncLock()
     private let resolutions = SingleFlight<Flight, ResolvedBookmark>()
     private let observers = Mutex<[UUID: AsyncStream<StoreChange<Key>>.Continuation]>([:])
@@ -70,8 +70,19 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
 
     /// Loads the stored records on the bookmark executor. Does nothing once they're loaded.
     public func load() async throws(Failure) {
-        guard !isLoaded.withLock({ $0 }) else { return }
-        try await service.executor.perform { () throws(Failure) in try self.ensureLoaded() }
+        guard !isLoaded else { return }
+        let task = loading ?? Task { await loadFromPersistence() }
+        loading = task
+        let result = await task.value
+        loading = nil
+        guard !isLoaded else { return }
+        switch result {
+        case .success(let records):
+            table = Table(records)
+            isLoaded = true
+        case .failure(let error):
+            throw .persistence(error)
+        }
     }
 
     /// Replaces the records with what the persistence holds now, such as after another
@@ -84,10 +95,8 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
             case .success(let loaded): records = loaded
             case .failure(let error): throw .persistence(error)
             }
-            return table.withLock { table in
-                let changes = table.replaceAll(with: records)
-                return (changes, table.takeInvalidated())
-            }
+            let changes = table.replaceAll(with: records)
+            return (changes, table.takeInvalidated())
         }
         finish(changes, invalidating: invalidated)
     }
@@ -95,37 +104,41 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     // MARK: - Reading
 
     /// All records in the policy's order, including unavailable ones.
-    public func records() throws(Failure) -> [Record] {
-        try read { $0.orderedRecords }
+    public func records() async throws(Failure) -> [Record] {
+        try await load()
+        return table.orderedRecords
     }
 
     /// The record for `key`, or `nil` when there is none.
-    public func record(_ key: Key) throws(Failure) -> Record? {
-        try read { $0[key] }
+    public func record(_ key: Key) async throws(Failure) -> Record? {
+        try await load()
+        return table[key]
     }
 
     /// The stored keys in the policy's order.
-    public func keys() throws(Failure) -> [Key] {
-        try read { $0.order }
+    public func keys() async throws(Failure) -> [Key] {
+        try await load()
+        return table.order
     }
 
     /// Whether a record exists for `key`.
-    public func contains(_ key: Key) throws(Failure) -> Bool {
-        try read { $0[key] != nil }
+    public func contains(_ key: Key) async throws(Failure) -> Bool {
+        try await load()
+        return table[key] != nil
     }
 
     /// The key whose item is `url`, matched by file identity first and by path second.
     public func key(matching url: URL) async throws(Failure) -> Key? {
         try await load()
         let identity = await identity(of: url)
-        return try read { $0.key(matching: identity, path: NormalizedPath(url)) }
+        return table.key(matching: identity, path: NormalizedPath(url))
     }
 
     /// A stream of changes to the records. Each call returns a new stream.
     ///
     /// The default policy buffers every change until it's read; pass a bounded policy for
     /// subscribers that may stop reading without cancelling.
-    public func changes(
+    public nonisolated func changes(
         bufferingPolicy: AsyncStream<StoreChange<Key>>.Continuation.BufferingPolicy = .unbounded
     ) -> AsyncStream<StoreChange<Key>> {
         let (stream, continuation) = AsyncStream<StoreChange<Key>>.makeStream(bufferingPolicy: bufferingPolicy)
@@ -179,7 +192,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     @discardableResult
     public func regrant(_ key: Key, with grant: Grant) async throws(Failure) -> Record {
         let context = try await validationContext(excluding: key, relinquishing: grant)
-        guard let existing = try record(key) else {
+        guard let existing = table[key] else {
             service.relinquish(grant)
             throw .notFound(key)
         }
@@ -223,10 +236,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     }
 
     /// Changes the metadata stored for `key`.
-    nonisolated(nonsending) public func updateMetadata(
-        _ key: Key,
-        _ change: (inout Metadata) -> Void
-    ) async throws(Failure) {
+    public func updateMetadata(_ key: Key, _ change: sending (inout Metadata) -> Void) async throws(Failure) {
         try await mutate { table throws(Failure) in
             guard table.updateMetadata(of: key, change) else { throw .notFound(key) }
             return ((), [.updated(key)])
@@ -297,7 +307,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     /// lease, so files inside a stored folder share the folder's access.
     public func lease(covering url: URL) async throws(Failure) -> AccessLease? {
         try await load()
-        let candidates = try read { $0.keysContaining(NormalizedPath(url)) }
+        let candidates = table.keysContaining(NormalizedPath(url))
         var deepestFailure: Failure?
         for key in candidates {
             do {
@@ -311,12 +321,12 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     }
 
     /// A new lease sharing the active access for `key`, or `nil` when `key` isn't leased.
-    public func activeLease(for key: Key) -> AccessLease? {
+    public nonisolated func activeLease(for key: Key) -> AccessLease? {
         registry.activeLease(for: key)
     }
 
     /// Stops all access immediately. Call at termination, after file readers have stopped.
-    public func endAllAccess() {
+    public nonisolated func endAllAccess() {
         registry.endAll()
     }
 
@@ -325,7 +335,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     /// Checks whether the item stored under `key` is reachable, without mounting, UI or access.
     public func availability(_ key: Key) async throws(Failure) -> Availability {
         try await load()
-        guard let record = try record(key) else { throw .notFound(key) }
+        guard let record = table[key] else { throw .notFound(key) }
         return await service.availability(of: record.data, kind: record.kind)
     }
 
@@ -337,9 +347,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     @discardableResult
     public func refreshStatuses() async throws(Failure) -> [Key] {
         try await load()
-        let candidates = try read { table in
-            table.order.compactMap { table.snapshot($0) }.filter { $0.record.status != .available }
-        }
+        let candidates = table.order.compactMap { table.snapshot($0) }.filter { $0.record.status != .available }
         var recovered: [Key] = []
         for snapshot in candidates {
             if let resolved = try? await resolve(snapshot), await commit(resolved, identity: nil, for: snapshot) {
@@ -351,7 +359,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
 
     // MARK: - Internals
 
-    func pendingResolutionCallers(for key: Key) -> Int {
+    nonisolated func pendingResolutionCallers(for key: Key) -> Int {
         resolutions.callers { $0.key == key }
     }
 
@@ -399,7 +407,7 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
             }
         } catch {
             Log.store.error("Saving a resolved bookmark failed: \(String(describing: error), privacy: .private)")
-            return table.withLock { $0.isCurrent(snapshot) }
+            return table.isCurrent(snapshot)
         }
     }
 
@@ -417,10 +425,8 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     }
 
     private func register(_ resolved: ResolvedBookmark, for snapshot: Table.Snapshot) -> AccessLease? {
-        table.withLock { table in
-            guard table.isCurrent(snapshot) else { return nil }
-            return registry.lease(for: snapshot.key, resolved: resolved)
-        }
+        guard table.isCurrent(snapshot) else { return nil }
+        return registry.lease(for: snapshot.key, resolved: resolved)
     }
 
     private func touch(_ key: Key) async {
@@ -436,64 +442,45 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     }
 
     private func snapshot(_ key: Key) throws(Failure) -> Table.Snapshot {
-        guard let snapshot = try read({ $0.snapshot(key) }) else { throw .notFound(key) }
+        guard let snapshot = table.snapshot(key) else { throw .notFound(key) }
         return snapshot
     }
 
     private func validationContext(excluding key: Key, relinquishing grant: Grant) async throws(Failure) -> ValidationContext {
         do {
             try await load()
-            return ValidationContext(existingPaths: try read { $0.paths(excluding: key) })
+            return ValidationContext(existingPaths: table.paths(excluding: key))
         } catch {
             service.relinquish(grant)
             throw error
         }
     }
 
-    private func read<T>(_ body: (Table) -> T) throws(Failure) -> T {
-        try ensureLoaded()
-        return table.withLock { body($0) }
-    }
-
     @discardableResult
-    nonisolated(nonsending) private func mutate<T>(
+    private func mutate<T>(
         _ body: (inout Table) throws(Failure) -> (T, [StoreChange<Key>])
     ) async throws(Failure) -> T {
         try await load()
         let (result, changes, invalidated) = try await writes.withLock { () async throws(Failure) in
-            var draft = table.withLock { $0 }
+            var draft = table
             let (result, changes) = try body(&draft)
             let invalidated = draft.takeInvalidated()
             if !changes.isEmpty {
                 try await save(draft.orderedRecords)
             }
-            table.withLock { $0 = draft }
+            table = draft
             return (result, changes, invalidated)
         }
         finish(changes, invalidating: invalidated)
         return result
     }
 
-    private func finish(_ changes: [StoreChange<Key>], invalidating keys: Set<Key>) {
+    private nonisolated func finish(_ changes: [StoreChange<Key>], invalidating keys: Set<Key>) {
         keys.forEach(registry.detach)
         guard !changes.isEmpty else { return }
         let continuations = observers.withLock { Array($0.values) }
         for continuation in continuations {
             changes.forEach { continuation.yield($0) }
-        }
-    }
-
-    private func ensureLoaded() throws(Failure) {
-        try isLoaded.withLock { isLoaded throws(Failure) in
-            guard !isLoaded else { return }
-            let records: [Record]
-            do throws(PersistenceError) {
-                records = try persistence.load()
-            } catch {
-                throw .persistence(error)
-            }
-            table.withLock { $0 = Table(records) }
-            isLoaded = true
         }
     }
 

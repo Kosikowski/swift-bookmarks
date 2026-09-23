@@ -270,7 +270,7 @@ struct SystemStoreTests {
             service: service
         )
         let path = try await second.withAccess(to: record.key) { sandbox.canonical($0) }
-        let stored = try #require(try second.record(record.key))
+        let stored = try #require(try await second.record(record.key))
 
         #expect(path == sandbox.canonical(moved))
         #expect(stored.data != record.data)

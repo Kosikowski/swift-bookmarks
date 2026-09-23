@@ -84,7 +84,7 @@ struct StoreLeaseTests {
 
         try await harness.store.lease("notes").end()
 
-        let updated = try #require(try harness.store.record("notes"))
+        let updated = try #require(try await harness.store.record("notes"))
         #expect(updated.fileIdentity != record.fileIdentity)
         #expect(updated.fileIdentity == harness.engine.fileIdentity(of: URL(filePath: "/Users/me/Notes.md")))
     }
@@ -100,7 +100,7 @@ struct StoreLeaseTests {
 
             try await harness.store.lease("a").end()
 
-            let record = try #require(try harness.store.record("a"))
+            let record = try #require(try await harness.store.record("a"))
             #expect(record.data != original.data)
             #expect(record.lastKnownPath == "/Users/me/Renamed")
             #expect(record.refreshedAt == harness.clock.now)
@@ -114,7 +114,7 @@ struct StoreLeaseTests {
             try await harness.add("a", "/Users/me/A")
             harness.engine.moveItem(from: "/Users/me/A", to: "/Users/me/Renamed")
             try await harness.store.lease("a").end()
-            let data = try #require(try harness.store.record("a")).data
+            let data = try #require(try await harness.store.record("a")).data
 
             let resolved = try await harness.store.service.resolve(data)
 
@@ -129,7 +129,7 @@ struct StoreLeaseTests {
             let lease = try await harness.store.lease("a")
 
             #expect(lease.isActive)
-            #expect(try harness.store.record("a")?.data == original.data)
+            #expect(try await harness.store.record("a")?.data == original.data)
             lease.end()
         }
 
@@ -141,7 +141,7 @@ struct StoreLeaseTests {
             let lease = try await harness.store.lease("a")
 
             #expect(lease.isActive)
-            #expect(try harness.store.record("a")?.data == original.data)
+            #expect(try await harness.store.record("a")?.data == original.data)
             lease.end()
             #expect(harness.engine.isBalanced)
         }
@@ -177,7 +177,7 @@ struct StoreLeaseTests {
             let error = await #expect(throws: TestStore.Failure.self) { try await harness.store.lease("a") }
 
             #expect(error?.bookmarkFailure == .missing)
-            let record = try #require(try harness.store.record("a"))
+            let record = try #require(try await harness.store.record("a"))
             #expect(record.status == .unavailable(.missing, since: harness.clock.now))
             #expect(record.status.failure == .missing)
             #expect(record.data == original.data)
@@ -195,7 +195,7 @@ struct StoreLeaseTests {
 
             _ = try? await harness.store.lease("a")
 
-            #expect(try harness.store.record("a")?.status == .unavailable(.missing, since: firstFailure))
+            #expect(try await harness.store.record("a")?.status == .unavailable(.missing, since: firstFailure))
             #expect(harness.persistence.base.saveCount == saves)
         }
 
@@ -207,7 +207,7 @@ struct StoreLeaseTests {
 
             _ = try? await harness.store.lease("a")
 
-            #expect(try harness.store.record("a") == nil)
+            #expect(try await harness.store.record("a") == nil)
             #expect(harness.saved.isEmpty)
             #expect(await collect(changes, count: 1) == [.removed("a")])
         }
@@ -220,7 +220,7 @@ struct StoreLeaseTests {
 
             _ = try? await harness.store.lease("a")
 
-            #expect(try harness.store.record("a")?.status.failure == .volumeUnavailable(name: "Backup"))
+            #expect(try await harness.store.record("a")?.status.failure == .volumeUnavailable(name: "Backup"))
         }
 
         @Test func customDropRules() async throws {
@@ -230,7 +230,7 @@ struct StoreLeaseTests {
 
             _ = try? await harness.store.lease("a")
 
-            #expect(try harness.store.record("a") == nil)
+            #expect(try await harness.store.record("a") == nil)
         }
 
         @Test func cancellationDoesNotMarkRecords() async throws {
@@ -245,7 +245,7 @@ struct StoreLeaseTests {
             _ = try? await task.value
             gate.open()
 
-            #expect(try harness.store.record("a")?.status == .available)
+            #expect(try await harness.store.record("a")?.status == .available)
         }
 
         @Test func unavailableRecordsRecoverWhenTheVolumeReturns() async throws {
@@ -260,7 +260,7 @@ struct StoreLeaseTests {
             let recovered = try await harness.store.refreshStatuses()
 
             #expect(recovered == ["a"])
-            #expect(try harness.store.record("a")?.status == .available)
+            #expect(try await harness.store.record("a")?.status == .available)
         }
     }
 
@@ -282,7 +282,7 @@ struct StoreLeaseTests {
                 Issue.record("Expected notFound, got \(String(describing: error))")
                 return
             }
-            #expect(try harness.store.record("a") == nil)
+            #expect(try await harness.store.record("a") == nil)
             #expect(harness.store.activeLease(for: "a") == nil)
             #expect(harness.engine.isBalanced)
         }
@@ -300,7 +300,7 @@ struct StoreLeaseTests {
             gate.open()
             let lease = try await task.value
 
-            #expect(try harness.store.record("a")?.data == regranted.data)
+            #expect(try await harness.store.record("a")?.data == regranted.data)
             #expect(lease.url.path(percentEncoded: false) == "/Users/me/New/")
             lease.end()
             #expect(harness.engine.isBalanced)

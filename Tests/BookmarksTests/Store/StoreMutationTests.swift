@@ -17,7 +17,7 @@ struct StoreMutationTests {
 
             #expect(try await harness.store.forget("a"))
 
-            #expect(try harness.store.records().isEmpty)
+            #expect(try await harness.store.records().isEmpty)
             #expect(harness.saved.isEmpty)
             #expect(await collect(changes, count: 1) == [.removed("a")])
         }
@@ -47,7 +47,7 @@ struct StoreMutationTests {
 
             try await harness.store.removeAll()
 
-            #expect(try harness.store.records().isEmpty)
+            #expect(try await harness.store.records().isEmpty)
             #expect(Set(await collect(changes, count: 2)) == [.removed("a"), .removed("b")])
         }
     }
@@ -78,7 +78,7 @@ struct StoreMutationTests {
 
             try await harness.store.regrant("a", with: harness.grant("/Users/me/A"))
 
-            #expect(try harness.store.record("a")?.status == .available)
+            #expect(try await harness.store.record("a")?.status == .available)
             try await harness.store.lease("a").end()
         }
 
@@ -120,7 +120,7 @@ struct StoreMutationTests {
                 Issue.record("Expected differentItem, got \(String(describing: error))")
                 return
             }
-            #expect(try harness.store.record("a")?.data == original.data)
+            #expect(try await harness.store.record("a")?.data == original.data)
             #expect(harness.engine.isBalanced)
         }
 
@@ -151,7 +151,7 @@ struct StoreMutationTests {
 
             try await harness.store.updateMetadata("a") { $0.name = "New" }
 
-            #expect(try harness.store.record("a")?.metadata.name == "New")
+            #expect(try await harness.store.record("a")?.metadata.name == "New")
             #expect(harness.saved.first?.metadata.name == "New")
         }
 
@@ -167,13 +167,13 @@ struct StoreMutationTests {
             try await harness.add("c", "/C")
 
             try await harness.store.move("c", to: 0)
-            #expect(try harness.store.keys() == ["c", "a", "b"])
+            #expect(try await harness.store.keys() == ["c", "a", "b"])
 
             try await harness.store.move("c", to: 99)
-            #expect(try harness.store.keys() == ["a", "b", "c"])
+            #expect(try await harness.store.keys() == ["a", "b", "c"])
 
             try await harness.store.move("b", to: -5)
-            #expect(try harness.store.keys() == ["b", "a", "c"])
+            #expect(try await harness.store.keys() == ["b", "a", "c"])
             #expect(harness.saved.map(\.key) == ["b", "a", "c"])
         }
 
@@ -191,7 +191,7 @@ struct StoreMutationTests {
             try await harness.add("b", "/B")
             try await harness.add("c", "/C")
 
-            #expect(try harness.store.keys() == ["c", "b", "a"])
+            #expect(try await harness.store.keys() == ["c", "b", "a"])
         }
 
         @Test func leasingMovesToTheFront() async throws {
@@ -200,7 +200,7 @@ struct StoreMutationTests {
 
             try await harness.store.lease("a").end()
 
-            #expect(try harness.store.keys() == ["a", "b"])
+            #expect(try await harness.store.keys() == ["a", "b"])
         }
 
         @Test func evictsTheOldestBeyondTheLimit() async throws {
@@ -211,7 +211,7 @@ struct StoreMutationTests {
 
             try await harness.add("d", "/d")
 
-            #expect(try harness.store.keys() == ["d", "c", "b"])
+            #expect(try await harness.store.keys() == ["d", "c", "b"])
             #expect(harness.saved.map(\.key) == ["d", "c", "b"])
             #expect(await collect(changes, count: 2) == [.added("d"), .removed("a")])
         }
@@ -223,7 +223,7 @@ struct StoreMutationTests {
             let again = try await harness.add("other", "/A")
 
             #expect(again.key == first.key)
-            #expect(try harness.store.keys().count == 2)
+            #expect(try await harness.store.keys().count == 2)
         }
 
         @Test func keepsUnavailableItems() async throws {
@@ -232,20 +232,20 @@ struct StoreMutationTests {
 
             _ = try? await harness.store.lease("a")
 
-            #expect(try harness.store.contains("a"))
+            #expect(try await harness.store.contains("a"))
         }
     }
 
     @Suite("Stored data")
     struct StoredData {
-        @Test func loadsExistingRecordsLazilyInStoredOrder() throws {
+        @Test func loadsExistingRecordsLazilyInStoredOrder() async throws {
             let records = ["z", "y", "x"].map {
                 TestRecord(key: $0, data: BookmarkData(Data($0.utf8)), kind: .appScoped(.readWrite), lastKnownPath: "/\($0)", createdAt: Date(), metadata: Tag(name: $0))
             }
             let harness = StoreHarness(records: records)
 
-            #expect(try harness.store.keys() == ["z", "y", "x"])
-            #expect(try harness.store.records() == records)
+            #expect(try await harness.store.keys() == ["z", "y", "x"])
+            #expect(try await harness.store.records() == records)
         }
 
         @Test func unresolvableRecordsSurviveUnrelatedWrites() async throws {

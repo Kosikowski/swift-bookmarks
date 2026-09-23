@@ -115,10 +115,10 @@ struct StoreWriteIsolationTests {
             }
         }
 
-        #expect(try store.record("a")?.metadata.name == "a")
+        #expect(try await store.record("a")?.metadata.name == "a")
 
         persistence.release.signal()
         try await writer.value
-        #expect(try store.record("a")?.metadata.name == "renamed")
+        #expect(try await store.record("a")?.metadata.name == "renamed")
     }
 }

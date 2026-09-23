@@ -53,8 +53,7 @@ extension BookmarkStore {
         prompt: String? = nil,
         attachedTo window: NSWindow? = nil
     ) async throws(Failure) -> Record? {
-        try await load()
-        guard let record = try record(key) else { throw .notFound(key) }
+        guard let record = try await record(key) else { throw .notFound(key) }
         let configuration = RegrantConfiguration.make(
             for: record,
             recorded: service.recordedValues(in: record.data),
