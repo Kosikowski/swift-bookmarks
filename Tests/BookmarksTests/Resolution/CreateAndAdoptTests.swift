@@ -418,7 +418,16 @@ struct CreateAndAdoptTests {
             #expect(!origin.isStartedBySystem(on: .visionOS))
         }
 
-        @Test(arguments: [Grant.Origin.swiftUIDrop, .fileImporter, .documentPicker, .alreadyAccessible])
+        /// Observed in the integration host: a dropped folder is readable before any start,
+        /// and one stop ends access. Without that stop, every drop leaked a scope.
+        @Test func swiftUIDropsAreStartedOnMacOS() {
+            #expect(Grant.Origin.swiftUIDrop.isStartedBySystem(on: .macOS))
+            #expect(!Grant.Origin.swiftUIDrop.isStartedBySystem(on: .macCatalyst))
+            #expect(!Grant.Origin.swiftUIDrop.isStartedBySystem(on: .iOS))
+            #expect(!Grant.Origin.swiftUIDrop.isStartedBySystem(on: .visionOS))
+        }
+
+        @Test(arguments: [Grant.Origin.fileImporter, .documentPicker, .alreadyAccessible])
         func neverStartedBySystem(_ origin: Grant.Origin) {
             for platform in SandboxEnvironment.Platform.allCases {
                 #expect(!origin.isStartedBySystem(on: platform))

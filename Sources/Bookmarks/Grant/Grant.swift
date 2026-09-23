@@ -16,8 +16,10 @@ public final class Grant: Sendable {
         case savePanel
         /// AppKit drag and drop through `NSDraggingInfo`. Access is already started on macOS.
         case appKitDrop
-        /// SwiftUI `dropDestination`. Whether the system starts access isn't verified, so the
-        /// library starts it around bookmark creation, which works either way.
+        /// SwiftUI `dropDestination`. Access is already started on macOS: the URL is readable
+        /// before any start, another start returns `false`, and one stop ends access, so the
+        /// grant owes exactly one stop. Verified in the integration host; unverified on Mac
+        /// Catalyst, where the library starts it around bookmark creation instead.
         case swiftUIDrop
         /// Files opened through Finder, the Dock or a service. Access is already started on macOS.
         case finderOpen
@@ -142,9 +144,11 @@ extension Grant.Origin {
         switch self {
         case .openPanel, .savePanel, .appKitDrop, .finderOpen:
             platform == .macOS || platform == .macCatalyst
+        case .swiftUIDrop:
+            platform == .macOS
         case .implicitBookmark:
             true
-        case .swiftUIDrop, .fileImporter, .documentPicker, .alreadyAccessible:
+        case .fileImporter, .documentPicker, .alreadyAccessible:
             false
         }
     }

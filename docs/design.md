@@ -322,7 +322,7 @@ public final class Grant: Sendable {    // used once; balances an unused system 
     public let origin: Origin
     public enum Origin: Sendable {
         case openPanel, savePanel, appKitDrop, finderOpen   // macOS: already started
-        case swiftUIDrop                                    // unverified: the library starts it
+        case swiftUIDrop                                    // macOS: already started (host run); Catalyst: the library starts it
         case fileImporter, documentPicker                   // not started
         case implicitBookmark                               // started on resolve
         case alreadyAccessible                              // app already reaches it (unsandboxed, container)
@@ -381,7 +381,7 @@ Validators return typed refusals; the app supplies the copy.
 
 `IntegrationHost` is a sandboxed macOS app (and an iOS app) with a scenario runner. It exists to answer, on real signed builds, the questions the research couldn't verify:
 
-1. Does `start` on an already-started panel/drop URL return `true` (refcount) or `false`? Is a `.dropDestination(for: URL.self)` URL started?
+1. Does `start` on an already-started panel/drop URL return `true` (refcount) or `false`? Is a `.dropDestination(for: URL.self)` URL started? **Answered for drops and Finder opens on macOS** (research §5): both are started; another `start` returns `false` on a drop and `true` on a Finder open; each owes one `stop`.
 2. Is the refcount per URL object or per path? Does a URL rebuilt with `URL(filePath:)` lose the scope?
 3. Which error does `.withoutMounting` give for an unmounted volume versus a deleted file?
 4. Does a read-only app with `.securityScopeAllowOnlyReadAccess` create scoped bookmarks?

@@ -152,6 +152,8 @@ Pitfalls:
 - macOS URLs from `NSOpenPanel`, `NSSavePanel`, drag-and-drop and Dock drops are **already started**. You must still call `stop` exactly once for them ([Accessing files…](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox)).
 - iOS `UIDocumentPickerViewController` URLs are **not** started ([804886](https://developer.apple.com/forums/thread/804886)).
 - SwiftUI `.fileImporter` is **not** auto-started, even on macOS. Quinn says SwiftUI chose consistency across platforms ([749333](https://developer.apple.com/forums/thread/749333)).
+- **[EXP]** SwiftUI `.dropDestination(for: URL.self)` on macOS 26, sandboxed integration host, a folder dragged from the Finder, twice: readable before any start; `start` returned **false**; one `stop` made it unreadable. The drop is **already started**, like an AppKit drop, but it can't be started again on top, so it owes exactly one `stop` and nothing else. Mac Catalyst not checked.
+- **[EXP]** A folder opened with the app from the Finder (`open -a`, reaching `application(_:open:)`), same host: readable before any start; `start` returned **true**; after balancing that start it was still readable; one more `stop` made it unreadable. Already started, with a nesting count on top, and one `stop` owed.
 - Regular bookmarks auto-start on resolution unless you pass `.withoutImplicitStartAccessing`.
 - Resolving a `.withSecurityScope` bookmark never auto-starts.
 - Kevin Elliott's recommendation: immediately bookmark the "magic" URL from the system, re-resolve it, and use only the resolved URL, so the app has a single code path ([798402](https://developer.apple.com/forums/thread/798402)).

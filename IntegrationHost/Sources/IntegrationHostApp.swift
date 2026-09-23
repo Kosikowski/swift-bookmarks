@@ -1,9 +1,12 @@
+import AppKit
 import Bookmarks
 import BookmarksUI
 import SwiftUI
 
 @main
 struct IntegrationHostApp: App {
+    @NSApplicationDelegateAdaptor private var delegate: FinderOpenDelegate
+
     var body: some Scene {
         WindowGroup("Bookmarks Integration Host") {
             ProbeView()
@@ -12,15 +15,29 @@ struct IntegrationHostApp: App {
     }
 }
 
+/// Receives folders opened from the Finder, the Dock or `open -a`, and probes them as drops are.
+final class FinderOpenDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        ProbeModel.shared.handle(urls.map { Grant(url: $0, origin: .finderOpen) })
+    }
+}
+
 @MainActor
 @Observable
 final class ProbeModel {
+    static let shared = ProbeModel()
+
     var observations: [ProbeResult] = []
     var savedBookmark: BookmarkData?
     private let probes = Probes()
 
     func record(_ new: [ProbeResult]) {
         observations.append(contentsOf: new)
+        // Also on standard output, so a run launched from a terminal can be read without the window.
+        for observation in new {
+            print("[\(observation.probe)] \(observation.detail)")
+        }
+        fflush(stdout)
     }
 
     func pickWithPanel(files: Bool, run probe: @escaping @Sendable (Probes, Grant) async -> [ProbeResult]) async {
@@ -53,12 +70,12 @@ final class ProbeModel {
 }
 
 struct ProbeView: View {
-    @State private var model = ProbeModel()
+    @State private var model = ProbeModel.shared
     @State private var importing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Each button answers one question from docs/design.md §11. Drop a folder anywhere to probe drops.")
+            Text("Each button answers one question from docs/design.md §11. Drop a folder anywhere to probe drops, or open one with the app from the Finder.")
                 .foregroundStyle(.secondary)
             HStack {
                 Button("1. Panel start state") {
