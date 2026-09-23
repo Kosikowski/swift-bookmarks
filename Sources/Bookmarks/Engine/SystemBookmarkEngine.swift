@@ -67,7 +67,7 @@ public struct SystemBookmarkEngine: BookmarkEngine {
 
     public func fileIdentity(of url: URL) -> FileIdentity? {
         guard
-            let values = try? url.resourceValues(forKeys: [.fileIdentifierKey, .volumeUUIDStringKey]),
+            let values = try? url.uncachedResourceValues(forKeys: [.fileIdentifierKey, .volumeUUIDStringKey]),
             let fileID = values.fileIdentifier
         else {
             return nil
@@ -76,7 +76,7 @@ public struct SystemBookmarkEngine: BookmarkEngine {
     }
 
     public func itemInfo(at url: URL) -> ItemInfo? {
-        guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else {
+        guard let values = try? url.uncachedResourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else {
             return nil
         }
         return ItemInfo(
@@ -92,6 +92,14 @@ public struct SystemBookmarkEngine: BookmarkEngine {
 
     public func aliasFileData(at url: URL) throws -> BookmarkData {
         BookmarkData(try URL.bookmarkData(withContentsOf: url))
+    }
+}
+
+extension URL {
+    func uncachedResourceValues(forKeys keys: Set<URLResourceKey>) throws -> URLResourceValues {
+        var url = self
+        url.removeAllCachedResourceValues()
+        return try url.resourceValues(forKeys: keys)
     }
 }
 
