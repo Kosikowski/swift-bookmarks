@@ -237,6 +237,8 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     public func add(_ grant: Grant, key: Key, metadata: Metadata) async throws -> BookmarkRecord<Key, Metadata>
     public func add(_ grant: Grant, metadata: Metadata) async throws -> BookmarkRecord<Key, Metadata> where Key == BookmarkID
     public func regrant(_ key: Key, with grant: Grant) async throws   // same key and metadata, new bytes
+    public func add<K, M>(copyOf other: BookmarkRecord<K, M>, key: Key, metadata: Metadata) async throws -> BookmarkRecord<Key, Metadata>
+        // moves a record from another store as it is: bytes, kind, identity, status; nothing resolved
     public func forget(_ key: Key) async throws -> Bool
 
     // Access

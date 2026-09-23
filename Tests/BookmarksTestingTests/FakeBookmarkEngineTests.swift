@@ -18,6 +18,14 @@ struct FakeBookmarkEngineTests {
     struct FileSystem {
         let engine = FakeBookmarkEngine()
 
+        @Test func aFolderIsGrantedAsADirectoryURL() {
+            engine.addItem(at: "/Users/me/Folder")
+            engine.addItem(at: "/Users/me/file.md", isDirectory: false)
+
+            #expect(engine.grant("/Users/me/Folder", origin: .openPanel).url.hasDirectoryPath)
+            #expect(!engine.grant("/Users/me/file.md", origin: .openPanel).url.hasDirectoryPath)
+        }
+
         @Test func addingCreatesParents() {
             engine.addItem(at: "/a/b/c.txt", isDirectory: false)
 

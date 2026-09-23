@@ -86,11 +86,13 @@ public final class FakeBookmarkEngine: FileSystemEngine {
     // MARK: - Grants
 
     /// A grant as the system hands it over, recording any access the system starts for it.
+    /// A folder's URL is a directory URL, as panels, drops and the Finder hand one over.
     ///
     /// A grant released without being adopted or relinquished stops that access through this
     /// engine, as the library's grants do.
     public func grant(_ path: String, origin: Grant.Origin) -> Grant {
-        let url = URL(filePath: path)
+        let isDirectory = state.withLock { $0.isDirectory(path) }
+        let url = URL(filePath: path, directoryHint: isDirectory ? .isDirectory : .notDirectory)
         let grant = Grant(url: url, origin: origin, platform: environment.platform) { [self] url in
             stopAccessing(url)
         }

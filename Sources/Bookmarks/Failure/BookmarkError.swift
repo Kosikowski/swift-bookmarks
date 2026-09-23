@@ -1,4 +1,4 @@
-public import Foundation
+import Foundation
 
 /// An error from a bookmark operation, carrying a classified ``BookmarkFailure``.
 ///

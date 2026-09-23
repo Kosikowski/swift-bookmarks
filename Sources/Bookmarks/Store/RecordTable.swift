@@ -100,6 +100,7 @@ struct RecordTable<Key: Hashable & Sendable, Metadata: Sendable & Equatable>: Se
         kind: BookmarkKind,
         path: String,
         identity: FileIdentity?,
+        status: RecordStatus = .available,
         date: Date,
         ordering: RecordOrdering
     ) -> Record? {
@@ -108,7 +109,7 @@ struct RecordTable<Key: Hashable & Sendable, Metadata: Sendable & Equatable>: Se
         record.kind = kind
         record.lastKnownPath = path
         record.fileIdentity = identity ?? record.fileIdentity
-        record.status = .available
+        record.status = status
         record.refreshedAt = date
         records[key] = record
         modified.insert(key)

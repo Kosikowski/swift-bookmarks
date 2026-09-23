@@ -71,6 +71,7 @@ Or conform your existing store to `BookmarkPersistence` and keep its format byte
 - Grants are used once. Adopt the ones you keep and let the others go: a grant released unused balances the access the system started for it.
 - `VolumeEvents`: mount and unmount notifications (macOS). `store.refreshStatuses(on: VolumeEvents.stream())` re-resolves unavailable records on every mount.
 - `store.lease(covering:)` and `ScopeLedger.shared.lease(covering:)`: reuse a folder's access for files inside it instead of starting one scope per file.
+- `store.add(copyOf:key:metadata:)`: move a bookmark from one store to another as it is, without resolving it, so an item that can't be reached now moves too.
 
 ## Testing apps that use it
 

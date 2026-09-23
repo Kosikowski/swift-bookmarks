@@ -194,19 +194,67 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     public func add(_ grant: Grant, key: Key, metadata: Metadata) async throws(Failure) -> Record {
         let context = try await prepare(grant, excluding: key)
         let resolved = try await adopt(grant, context: context)
-        let location = resolved.handle.path
-        let path = location.string
+        return try await insert(
+            Item(data: resolved.data, kind: kind, location: resolved.handle.path, identity: resolved.fileIdentity, status: .available),
+            key: key,
+            metadata: metadata
+        )
+    }
+
+    /// Stores a bookmark another store keeps, such as when an item moves from one list to
+    /// another, under `key`, replacing any record for `key`.
+    ///
+    /// The bytes, kind, identity and status are taken as they are, and nothing is resolved,
+    /// so an item that can't be reached now moves too. Validators don't run, because the item
+    /// isn't accessed. Duplicates are handled as by ``add(_:key:metadata:)``; with
+    /// ``DuplicateHandling/returnExisting`` the existing record takes the copied bytes and
+    /// status.
+    @discardableResult
+    public func add<OtherKey, OtherMetadata>(
+        copyOf other: BookmarkRecord<OtherKey, OtherMetadata>,
+        key: Key,
+        metadata: Metadata
+    ) async throws(Failure) -> Record {
+        if other.kind == .implicit, service.environment.supportsSecurityScope {
+            throw .bookmark(BookmarkError(.unsupported(reason: Self.persistedImplicitReason)))
+        }
+        try await load()
+        let (_, isCaseSensitive) = await inspect(URL(filePath: other.lastKnownPath), identity: false)
+        return try await insert(
+            Item(
+                data: other.data,
+                kind: other.kind,
+                location: NormalizedPath(other.lastKnownPath, isCaseSensitive: isCaseSensitive),
+                identity: other.fileIdentity,
+                status: other.status
+            ),
+            key: key,
+            metadata: metadata
+        )
+    }
+
+    private struct Item: Sendable {
+        let data: BookmarkData
+        let kind: BookmarkKind
+        let location: NormalizedPath
+        let identity: FileIdentity?
+        let status: RecordStatus
+    }
+
+    private func insert(_ item: Item, key: Key, metadata: Metadata) async throws(Failure) -> Record {
+        let path = item.location.string
         let timestamp = now()
-        return try await mutate { [policy, kind] table throws(Failure) in
+        return try await mutate { [policy] table throws(Failure) in
             if policy.duplicates != .allow,
-               let existing = table.duplicate(of: resolved.fileIdentity, path: location, excluding: key) {
+               let existing = table.duplicate(of: item.identity, path: item.location, excluding: key) {
                 guard policy.duplicates == .returnExisting else { throw .duplicate(of: existing.key) }
                 return table.replaceItem(
                     of: existing.key,
-                    data: resolved.data,
-                    kind: kind,
+                    data: item.data,
+                    kind: item.kind,
                     path: path,
-                    identity: resolved.fileIdentity,
+                    identity: item.identity,
+                    status: item.status,
                     date: timestamp,
                     ordering: policy.ordering
                 ) ?? existing
@@ -214,11 +262,11 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             let previous = table[key]
             let record = Record(
                 key: key,
-                data: resolved.data,
-                kind: kind,
+                data: item.data,
+                kind: item.kind,
                 lastKnownPath: path,
-                fileIdentity: resolved.fileIdentity,
-                status: .available,
+                fileIdentity: item.identity,
+                status: item.status,
                 createdAt: previous?.createdAt ?? timestamp,
                 refreshedAt: previous == nil ? nil : timestamp,
                 metadata: metadata
