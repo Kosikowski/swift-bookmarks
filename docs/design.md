@@ -277,11 +277,11 @@ Store behaviour:
 
 - **Stable identity.** The key never changes. Refresh and re-grant replace `data` under the same key. `BookmarkID` (a UUID wrapper) is provided for apps without their own id.
 - **Refresh compare-and-swap.** A refresh only writes if the stored bytes are still the ones that were resolved (R4).
-- **Failure policy per store** (`StorePolicy.onFailure`): `.keepAndMark` (default), or drop for specific failures. A store of locations the app can't work without can drop what can never come back, while a recents list keeps everything.
+- **Failure policy per store** (`StorePolicy.failureHandling`): `.keep` (default), or drop for specific failures. A store of locations the app can't work without can drop a record that can never come back (`.missing`, `.corrupt`), while a recents list keeps everything. `.corrupt` means bytes that record nothing, and a bookmark that has lost its scope is `.needsRegrant` and kept.
 - **Unresolved records are first-class.** They're in `records()` with a status and `lastKnownPath`, and every write includes them (R5).
 - **Duplicates by file identity**, not case-insensitive path.
 - **Optional ordering and limit** (`StorePolicy.limit`) for recents lists.
-- **Validators** run on `add` and `regrant` (§9.3).
+- **Validators** run on `add` and `regrant` (§9.3): the policy's for every key, and `validatorsForKey` for checks that depend on the key.
 - **Writes are serialised** and the in-memory state only changes after persistence succeeds. The actor is reentrant at the persistence `await`, so an async lock keeps writes in order; reads see the last saved state and never wait for a save.
 - **Writes merge with what is stored.** Each change is applied to the records as the persistence holds them at that moment, inside `BookmarkPersistence.update(_:)`, so a host app and its extensions can share one file without overwriting each other. Changes another process saved reach subscribers with the next change, with `reload()`, or continuously through `reload(on: persistence.changes())`.
 - **Paths compare as the volume does.** Path fallbacks (duplicates without an identity, `key(matching:)`, covering leases, overlap validators) ignore Unicode normalisation and the `/private` firmlinks, and ignore case where the engine reports that the volume does.
@@ -293,6 +293,8 @@ public protocol BookmarkPersistence<Key, Metadata>: Sendable {
     associatedtype Key; associatedtype Metadata
     func load() throws -> [BookmarkRecord<Key, Metadata>]
     func save(_ records: [BookmarkRecord<Key, Metadata>]) throws
+    /// Whether load() returns status, identity, path and dates as saved. Defaults to true.
+    var storesRecordState: Bool { get }
     /// Read, transform and save as one step. Defaults to load() then save().
     func update(_ transform: ([BookmarkRecord<Key, Metadata>]) -> [BookmarkRecord<Key, Metadata>]?) throws
 }
@@ -306,7 +308,7 @@ Built in:
 | `JSONFilePersistence(url:)` | atomic writes, `NSFileCoordinator`, `schemaVersion`, `.last-good` copy, `.corrupt-<timestamp>` quarantine |
 | `InMemoryPersistence` | tests, previews, screenshot builds |
 
-**Adapters for existing formats.** An app keeps its current format by writing a small `BookmarkPersistence` that maps its stored shape to `BookmarkRecord` and back. Fields the library adds (status, identity, dates) that the old format can't hold are recomputed at load. This is the compatibility contract: **existing bytes, keys and ids are read and written unchanged.**
+**Adapters for existing formats.** An app keeps its current format by writing a small `BookmarkPersistence` that maps its stored shape to `BookmarkRecord` and back. Fields the library adds (status, identity, dates) that the old format can't hold start unknown at launch and are learned by resolving; the adapter returns `false` from `storesRecordState`, and the store keeps them in memory for records whose bytes haven't changed, so a write doesn't reset them. This is the compatibility contract: **existing bytes, keys and ids are read and written unchanged.**
 
 `MigratingPersistence` imports legacy records once on load for apps changing format later, and never deletes the legacy value until the migrated value is saved. It requires a `MigrationMarker`, so a store the user empties isn't refilled from legacy data.
 
@@ -351,7 +353,7 @@ Save panels return URLs for files that don't exist yet; bookmark creation fails 
 - `.directoryOnly`, `.fileOnly`
 - `.noSymlink`
 - `.noOverlap(with: store)` — duplicate, parent or child of an existing record
-- `.covers(_ target: URL)`
+- `.covers(_ target: URL)` (one target per key through `validatorsForKey`)
 
 Validators return typed refusals; the app supplies the copy.
 
@@ -359,7 +361,7 @@ Validators return typed refusals; the app supplies the copy.
 `service.aliasFiles.write(aliasTo:at:)` and `service.aliasFiles.resolve(aliasAt:)`. No scope, per research §3.
 
 ### 9.5 Environment awareness
-`SandboxEnvironment.current` reports sandboxed/unsandboxed and platform. When unsandboxed (direct-distribution builds, test runners), the default kind becomes `.reference` for move tracking only, and `didStartScope == false` is expected.
+`SandboxEnvironment.current` reports sandboxed/unsandboxed and platform. When unsandboxed (direct-distribution builds, test runners), the default kind becomes `.reference` for move tracking only, and `didStartScope == false` is expected. Whether the system starts access for a grant depends on the platform, not on the sandbox, so the sandbox answer only chooses a store's default kind; an app that names its stores' kinds keeps its own edition check.
 
 ### 9.6 Volumes
 `VolumeEvents` (macOS) is an `AsyncStream` of mount and unmount notifications. `BookmarkStore.refreshStatuses()` re-resolves every record not known to be available, and `refreshStatuses(on:)` does so on every mount until its stream ends or its task is cancelled.
