@@ -55,7 +55,7 @@ struct StoreLeaseTests {
 
         let tasks = (0..<5).map { _ in Task { try await store.lease("a") } }
         await gate.waitUntilReached()
-        while store.pendingResolutionCallers(for: "a") < 5 {
+        while await store.pendingResolutionCallers(for: "a") < 5 {
             await Task.yield()
         }
         gate.open()
@@ -233,6 +233,52 @@ struct StoreLeaseTests {
             _ = try? await harness.store.lease("a")
 
             #expect(try await harness.store.record("a") == nil)
+        }
+
+        @Test func everyCallerSharingAFailedResolutionGetsTheFailure() async throws {
+            let harness = StoreHarness()
+            try await harness.add("a", "/Users/me/A")
+            harness.engine.failResolution(of: "/Users/me/A", with: FakeErrors.corrupt)
+            let gate = harness.engine.holdResolution(of: "/Users/me/A")
+            let store = harness.store
+            let resolutions = harness.engine.calls.resolutions
+
+            let tasks = (0..<3).map { _ in Task { try await store.lease("a") } }
+            await gate.waitUntilReached()
+            while await store.pendingResolutionCallers(for: "a") < 3 {
+                await Task.yield()
+            }
+            gate.open()
+
+            for task in tasks {
+                let error = await #expect(throws: TestStore.Failure.self) { try await task.value }
+                #expect(error?.bookmarkFailure == .needsRegrant)
+            }
+            #expect(harness.engine.calls.resolutions == resolutions + 1)
+            #expect(await store.pendingResolutionCallers(for: "a") == 0)
+        }
+
+        @Test func aCancelledCallerStopsWaitingWhileOthersGetTheLease() async throws {
+            let harness = StoreHarness()
+            try await harness.add("a", "/Users/me/A")
+            let gate = harness.engine.holdResolution(of: "/Users/me/A")
+            let store = harness.store
+
+            let cancelled = Task { try await store.lease("a") }
+            let patient = Task { try await store.lease("a") }
+            await gate.waitUntilReached()
+            while await store.pendingResolutionCallers(for: "a") < 2 {
+                await Task.yield()
+            }
+            cancelled.cancel()
+
+            let error = await #expect(throws: TestStore.Failure.self) { try await cancelled.value }
+            #expect(error?.bookmarkFailure == .cancelled)
+            gate.open()
+            let lease = try await patient.value
+            #expect(lease.isActive)
+            lease.end()
+            #expect(harness.engine.isBalanced)
         }
 
         @Test func cancellationDoesNotMarkRecords() async throws {

@@ -30,13 +30,18 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     private var isLoaded = false
     private var loading: Task<Result<[Record], PersistenceError>, Never>?
     private let writes = AsyncLock()
-    private let resolutions = SingleFlight<Flight, ResolvedBookmark>()
+    private var resolutions: [Flight: Resolution] = [:]
     private let observers = Mutex<[UUID: AsyncStream<StoreUpdate<Key, Metadata>>.Continuation]>([:])
     private let now: @Sendable () -> Date
 
     private struct Flight: Hashable, Sendable {
         let key: Key
         let generation: UInt64
+    }
+
+    private struct Resolution {
+        let task: Task<Result<ResolvedBookmark, BookmarkError>, Never>
+        var callers: Int
     }
 
     /// Creates a store.
@@ -363,8 +368,8 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
 
     // MARK: - Internals
 
-    nonisolated func pendingResolutionCallers(for key: Key) -> Int {
-        resolutions.callers { $0.key == key }
+    func pendingResolutionCallers(for key: Key) -> Int {
+        resolutions.filter { $0.key.key == key }.values.reduce(0) { $0 + $1.callers }
     }
 
     private func adopt(_ grant: Grant, context: ValidationContext) async throws(Failure) -> ResolvedBookmark {
@@ -376,19 +381,43 @@ public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendabl
     }
 
     private func resolve(_ snapshot: Table.Snapshot) async throws(Failure) -> ResolvedBookmark {
-        let policy = ResolutionPolicy(mounting: policy.mounting, allowsUI: policy.allowsUI)
-        let service = service
-        let record = snapshot.record
+        let result: Result<ResolvedBookmark, BookmarkError>
         do {
-            return try await resolutions.run(Flight(key: snapshot.key, generation: snapshot.generation)) {
-                try await service.resolve(record.data, kind: record.kind, policy: policy)
-            }
-        } catch let error as BookmarkError {
-            await commit(error.failure, for: snapshot)
-            throw .bookmark(error)
+            result = try await sharedResolution(of: snapshot).valueUnlessCancelled
         } catch {
             throw .bookmark(BookmarkError(.cancelled))
         }
+        switch result {
+        case .success(let resolved):
+            return resolved
+        case .failure(let error):
+            await commit(error.failure, for: snapshot)
+            throw .bookmark(error)
+        }
+    }
+
+    private func sharedResolution(of snapshot: Table.Snapshot) -> Task<Result<ResolvedBookmark, BookmarkError>, Never> {
+        let flight = Flight(key: snapshot.key, generation: snapshot.generation)
+        if var resolution = resolutions[flight] {
+            resolution.callers += 1
+            resolutions[flight] = resolution
+            return resolution.task
+        }
+        let policy = ResolutionPolicy(mounting: policy.mounting, allowsUI: policy.allowsUI)
+        let service = service
+        let record = snapshot.record
+        let task = Task {
+            let result: Result<ResolvedBookmark, BookmarkError>
+            do throws(BookmarkError) {
+                result = .success(try await service.resolve(record.data, kind: record.kind, policy: policy))
+            } catch {
+                result = .failure(error)
+            }
+            resolutions[flight] = nil
+            return result
+        }
+        resolutions[flight] = Resolution(task: task, callers: 1)
+        return task
     }
 
     private func commit(_ resolved: ResolvedBookmark, identity: FileIdentity?, for snapshot: Table.Snapshot) async -> Bool {
