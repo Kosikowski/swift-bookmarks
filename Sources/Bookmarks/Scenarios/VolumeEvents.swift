@@ -1,5 +1,6 @@
 #if os(macOS)
 public import AppKit
+import os
 
 /// A volume that was mounted or unmounted.
 public enum VolumeEvent: Sendable, Hashable {
@@ -17,9 +18,7 @@ public enum VolumeEvent: Sendable, Hashable {
 /// Mount and unmount notifications, for re-resolving bookmarks on volumes that come back.
 ///
 /// ```swift
-/// for await event in VolumeEvents.stream() {
-///     if case .mounted = event { try await store.refreshStatuses() }
-/// }
+/// Task { await store.refreshStatuses(on: VolumeEvents.stream()) }
 /// ```
 public enum VolumeEvents {
     /// A stream of volume events. The stream ends when its consumer stops iterating.
@@ -43,6 +42,21 @@ public enum VolumeEvents {
         center.addObserver(forName: name, object: nil, queue: nil) { notification in
             if let url = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL {
                 continuation.yield(event(url))
+            }
+        }
+    }
+}
+
+extension BookmarkStore {
+    /// Refreshes the statuses of records that aren't known to be available each time `events`
+    /// reports a mounted volume, until the stream ends or the calling task is cancelled.
+    public func refreshStatuses(on events: AsyncStream<VolumeEvent>) async {
+        for await event in events {
+            guard case .mounted = event else { continue }
+            do {
+                try await refreshStatuses()
+            } catch {
+                Log.store.error("Refreshing statuses after a mount failed: \(String(describing: error), privacy: .private)")
             }
         }
     }

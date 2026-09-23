@@ -261,6 +261,42 @@ struct VolumeEventsTests {
         #expect(events.map(\.volumeURL) == [volume, volume])
     }
 
+    @Test func storesRefreshStatusesWhenAVolumeMounts() async throws {
+        let harness = StoreHarness()
+        harness.engine.mountVolume(at: "/Volumes/Backup")
+        try await harness.add("a", "/Volumes/Backup/Builds")
+        harness.engine.unmountVolume(at: "/Volumes/Backup")
+        _ = try? await harness.store.lease("a")
+        let (events, continuation) = AsyncStream<VolumeEvent>.makeStream()
+        let volume = URL(filePath: "/Volumes/Backup")
+
+        continuation.yield(.unmounted(volume))
+        continuation.finish()
+        await harness.store.refreshStatuses(on: events)
+        let afterUnmount = try await harness.store.record("a")?.status.failure
+
+        harness.engine.mountVolume(at: "/Volumes/Backup")
+        let (mounts, mountContinuation) = AsyncStream<VolumeEvent>.makeStream()
+        mountContinuation.yield(.mounted(volume))
+        mountContinuation.finish()
+        await harness.store.refreshStatuses(on: mounts)
+
+        #expect(afterUnmount == .volumeUnavailable(name: "Backup"))
+        #expect(try await harness.store.record("a")?.status == .available)
+    }
+
+    @Test func mountRefreshesSurviveLoadFailures() async {
+        let harness = StoreHarness()
+        harness.persistence.failLoads(1)
+        let (events, continuation) = AsyncStream<VolumeEvent>.makeStream()
+
+        continuation.yield(.mounted(URL(filePath: "/Volumes/Backup")))
+        continuation.finish()
+        await harness.store.refreshStatuses(on: events)
+
+        #expect(harness.persistence.loadCount == 1)
+    }
+
     @Test func stopsObservingWhenTheConsumerStops() async {
         let center = NotificationCenter()
         let volume = URL(filePath: "/Volumes/Backup")

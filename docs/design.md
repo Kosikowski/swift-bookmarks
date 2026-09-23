@@ -350,7 +350,7 @@ Validators return typed refusals; the app supplies the copy.
 `SandboxEnvironment.current` reports sandboxed/unsandboxed and platform. When unsandboxed (direct-distribution builds, test runners), the default kind becomes `.reference` for move tracking only, and `didStartScope == false` is expected.
 
 ### 9.6 Volumes
-`VolumeEvents` (macOS) is an `AsyncStream` of mount and unmount notifications. `BookmarkStore.refreshStatuses()` re-resolves every record not known to be available, typically when a volume mounts.
+`VolumeEvents` (macOS) is an `AsyncStream` of mount and unmount notifications. `BookmarkStore.refreshStatuses()` re-resolves every record not known to be available, and `refreshStatuses(on:)` does so on every mount until its stream ends or its task is cancelled.
 
 ## 10. UI helpers (`BookmarksUI`)
 
