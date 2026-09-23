@@ -1,8 +1,97 @@
 # swift-bookmarks
 
-A Swift package for URL bookmarks and security-scoped access on macOS, Mac Catalyst, iOS/iPadOS and visionOS.
+URL bookmarks and security-scoped access for macOS, Mac Catalyst, iOS/iPadOS and visionOS, done once and correctly: every bookmark kind, balanced access, stale refresh inside the scope, typed failures, pluggable storage and test doubles.
 
-Status: design stage. No code yet.
+Swift 6, macOS 15 / iOS 18 / visionOS 2 / Mac Catalyst 18.
 
-- [Research](docs/research/README.md): how Apple's bookmark APIs actually behave, with sources and experiment code.
-- [Design](docs/design.md): the proposed package.
+## Products
+
+| Product | What it's for |
+|---|---|
+| `Bookmarks` | Creating, resolving and storing bookmarks; access leases |
+| `BookmarksUI` | Open panel, document picker, SwiftUI importer and drop, re-grant flow |
+| `BookmarksTesting` | `FakeBookmarkEngine` for app tests: simulated file system, sandbox rules, access accounting |
+
+## Storing folders the user picked
+
+```swift
+import BookmarksUI
+
+let store = BookmarkStore<BookmarkID, NoMetadata>(
+    persistence: JSONFilePersistence(fileURL: applicationSupport.appending(path: "bookmarks.json")),
+    policy: StorePolicy(validators: [.directoryOnly, .notTooBroad, .noOverlap])
+)
+
+// Take in a folder from the open panel. The grant is adopted and balanced.
+for grant in await OpenPanelPicker.choose(.folder(message: "Choose a projects folder")) {
+    try await store.add(grant)
+}
+
+// Use it later, from any thread.
+try await store.withAccess(to: id) { folder in
+    try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+}
+
+// Long-lived access, e.g. for a file watcher. Ending is idempotent; deinit ends it too.
+let lease = try await store.lease(id)
+defer { lease.end() }
+```
+
+Records keep their key when bookmarks are refreshed or re-granted. A record that fails to resolve stays in the store with `status == .unavailable(failure, since:)` unless the policy drops it:
+
+```swift
+switch record.status.failure {
+case .volumeUnavailable?: // show "disk not connected", retry after VolumeEvents reports a mount
+case .needsRegrant?, .denied?: try await store.regrantWithOpenPanel(record.key, message: "Find “\(record.displayName)”")
+case .missing?: try store.forget(record.key)
+default: break
+}
+```
+
+## Keeping your own storage format
+
+Use `Bookmarks` directly when bookmark bytes live inside your own documents or settings. The bytes are plain Apple bookmark data, so existing values keep working.
+
+```swift
+let bookmarks = Bookmarks()
+let resolved = try await bookmarks.resolve(savedData)
+if resolved.needsPersisting { save(resolved.data) }
+let lease = resolved.beginAccess()
+```
+
+Or conform your existing store to `BookmarkPersistence` and keep its format byte for byte. `MigratingPersistence` imports legacy records once.
+
+## Other scenarios
+
+- `DocumentBookmarks`: document-scoped bookmarks to files referenced from a document.
+- `Handoff`: tokens that pass access to an XPC service or helper.
+- `AliasFiles`: Finder alias files.
+- `VolumeEvents`: mount and unmount notifications (macOS).
+- `AccessRegistry.lease(covering:)`: reuse a folder's access for files inside it instead of starting one scope per file.
+
+## Testing apps that use it
+
+```swift
+let engine = FakeBookmarkEngine()
+engine.addItem(at: "/Users/me/Project")
+let store = BookmarkStore<String, NoMetadata>(persistence: InMemoryPersistence(), bookmarks: Bookmarks(engine: engine))
+
+try await store.add(engine.grant("/Users/me/Project", origin: .openPanel), key: "project")
+engine.moveItem(from: "/Users/me/Project", to: "/Users/me/Renamed")
+try await store.lease("project").end()
+
+#expect(engine.isBalanced)
+```
+
+## Development
+
+```sh
+swift test                      # unit, fake-engine, UI and system tests
+```
+
+`swift test` isn't sandboxed. The [integration host](IntegrationHost/README.md) checks sandbox behaviour in a real app.
+
+## Documents
+
+- [Research](docs/research/README.md): how Apple's bookmark APIs behave, with sources and experiments.
+- [Design](docs/design.md): the package design and implementation notes.

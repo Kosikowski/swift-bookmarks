@@ -1,6 +1,6 @@
 # swift-bookmarks — design
 
-Status: proposal, 2026-09-23. Inputs: [research](research/README.md).
+Status: implemented, 2026-09-23 (see §15 for where the code differs from this sketch). Inputs: [research](research/README.md).
 
 ## 1. Goals
 
@@ -233,16 +233,16 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
     public func forget(_ key: Key) async throws
 
     // Access
-    public func lease(_ key: Key, policy: ResolutionPolicy = .init()) async throws(BookmarkError) -> AccessLease
+    public func lease(_ key: Key) async throws(BookmarkStoreError<Key>) -> AccessLease
     public func withAccess<T: Sendable>(_ keys: [Key], _ body: ([Key: URL]) async throws -> T) async throws -> T
 
     // Reading
-    public func records() async throws -> [BookmarkRecord<Key, Metadata>]   // includes unresolved ones
+    public func records() throws(BookmarkStoreError<Key>) -> [BookmarkRecord<Key, Metadata>]   // includes unresolved ones
     public func record(_ key: Key) async throws -> BookmarkRecord<Key, Metadata>?
     public func key(matching url: URL) async throws -> Key?                  // by file identity, then path
     public func updateMetadata(_ key: Key, _ change: (inout Metadata) -> Void) async throws
     public func availability(_ key: Key) async -> Availability
-    public func reloadUnavailable() async                                    // e.g. on volume mount
+    public func refreshStatuses() async throws(BookmarkStoreError<Key>) -> [Key]  // e.g. on volume mount
 
     public var changes: AsyncStream<StoreChange<Key>> { get }
 }
@@ -340,14 +340,14 @@ Validators return typed refusals; the app supplies the copy.
 `SandboxEnvironment.current` reports sandboxed/unsandboxed and platform. When unsandboxed (direct-distribution builds, test runners), the default kind becomes `.reference` for move tracking only, and `didStartScope == false` is expected.
 
 ### 9.6 Volumes
-`VolumeEvents` (macOS) is an `AsyncStream` of mount and unmount notifications. `BookmarkStore.reloadUnavailable()` re-resolves only `.volumeUnavailable` records when a volume mounts.
+`VolumeEvents` (macOS) is an `AsyncStream` of mount and unmount notifications. `BookmarkStore.refreshStatuses()` re-resolves every record not known to be available, typically when a volume mounts.
 
 ## 10. UI helpers (`BookmarksUI`)
 
 - `FolderPicker.chooseFolder(…) async -> Grant?` and `chooseFile(types:)`: `NSOpenPanel` via `begin()` on macOS; `UIDocumentPickerViewController` on iOS.
-- `.bookmarkImporter(isPresented:kind:onGrant:)`: SwiftUI `fileImporter` wrapper that produces `Grant`s with the right origin.
+- `.bookmarkImporter(isPresented:configuration:onGrants:onFailure:)`: SwiftUI `fileImporter` wrapper that produces `Grant`s with the right origin.
 - `.bookmarkDropDestination(onGrant:)`: drop wrapper with origin `.drop`.
-- `Regrant.present(for record:)`: opens the panel at the record's last known location, with a message the app supplies, and calls `store.regrant`. Optional check that the user picked the same file identity.
+- `BookmarkStore.regrantWithOpenPanel(_:message:prompt:attachedTo:)`: opens the panel at the record's last known location, with a message the app supplies, and calls `store.regrant`. `StorePolicy.requiresSameItemOnRegrant` checks that the user picked the same file identity.
 
 ## 11. Testing
 
@@ -384,3 +384,19 @@ The answers feed back into `Grant` intake and the fake engine, so unit tests sta
 - **Minimum OS:** raising the floor above macOS 15 would allow dropping some availability checks.
 - **Actor vs Mutex for the store.** The design uses `Mutex` so call sites stay synchronous. If callers can await, an actor would be simpler.
 - **Whether `BookmarksUI` should wrap `NSDocument`/recent documents.** Nothing needs it yet; `recentDocumentURLs` leaks extensions (research §5), so a helper would have to avoid it.
+
+## 15. Implementation notes
+
+Where the code differs from the sketches above:
+
+- **Engine:** `BookmarkEngine` takes Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. It also inspects items (`itemInfo(at:)`, `fileIdentity(of:)`, `itemExists(atPath:)`) and reads and writes alias files, so every file system call goes through one seam.
+- **Default kind:** `BookmarkKind.persistentDefault(for:)` takes the environment; the static property uses the current process.
+- **Failures:** `BookmarkFailure` also has `.refused(GrantRefusal)` for validator refusals and `.cancelled` for callers that stop waiting.
+- **Validators** run inside `Bookmarks.adopt` and `Bookmarks.create`, while access to the item is held, through `validators:` and `context:` parameters. They inspect items through `BookmarkEngine.itemInfo(at:)`.
+- **Grant origins:** `Grant.isStartedBySystem(on:)` takes the platform, so tests can check every platform on one machine.
+- **Store:** a `Mutex`-based `final class` (the open question in §14). Reads, metadata updates, reordering and forgetting are synchronous; anything that talks to the system is `async`. Errors are `BookmarkStoreError<Key>`. The resolution policy comes from `StorePolicy.resolution`, not a per-call argument, and the store never lets resolution start implicit access.
+- **Save panels:** there is no `commitWrite()`. Callers write the file first, then create or adopt the bookmark.
+- **Unsandboxed builds** default to `.reference` bookmarks.
+- **System engine:** resource values are read without `URL`'s cache, because cached values hid identity changes after atomic saves.
+- **UI:** `OpenPanelPicker`, `DocumentPicker`, `RegrantConfiguration`, `GrantMapping`, `bookmarkImporter` and `bookmarkDropDestination`.
+- **Integration host:** `IntegrationHost/` is an XcodeGen project; see its README for the probes.
