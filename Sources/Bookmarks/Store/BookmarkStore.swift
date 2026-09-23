@@ -308,6 +308,23 @@ public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: S
         return try await body(lease.url)
     }
 
+    /// A lease on the stored item that contains `url`, or `nil` when no stored item does.
+    ///
+    /// The deepest containing item wins. Use ``AccessLease/url(forDescendant:)`` to reach
+    /// `url` through the lease, so files inside a stored folder share the folder's access.
+    public func lease(covering url: URL) async throws(Failure) -> AccessLease? {
+        let target = PathContainment.normalizedComponents(url)
+        let key = try read { state in
+            state.orderedRecords
+                .map { ($0.key, PathContainment.normalizedComponents(URL(filePath: $0.lastKnownPath))) }
+                .filter { target.starts(with: $0.1) }
+                .max { $0.1.count < $1.1.count }?
+                .0
+        }
+        guard let key else { return nil }
+        return try await lease(key)
+    }
+
     /// A new lease sharing the active access for `key`, or `nil` when `key` isn't leased.
     public func activeLease(for key: Key) -> AccessLease? {
         registry.activeLease(for: key)
