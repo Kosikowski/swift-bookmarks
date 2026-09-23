@@ -35,13 +35,10 @@ enum FakeFlavor: Codable, Equatable, Sendable {
 
     func checkResolution(options: URL.BookmarkResolutionOptions, document: String?, payload: FakePayload) throws {
         #if os(macOS) || targetEnvironment(macCatalyst)
-        let resolvesWithScope = options.contains(.withSecurityScope)
-        #else
-        let resolvesWithScope = false
-        #endif
-        if resolvesWithScope, !isScoped {
+        if options.contains(.withSecurityScope), !isScoped {
             throw CocoaError.error(.fileReadCorruptFile)
         }
+        #endif
         if case .documentScoped = self, payload.document != document {
             throw CocoaError.error(.fileReadCorruptFile)
         }
