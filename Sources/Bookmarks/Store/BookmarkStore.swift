@@ -192,13 +192,26 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     /// what happens. The grant is relinquished whether or not adding succeeds.
     @discardableResult
     public func add(_ grant: Grant, key: Key, metadata: Metadata) async throws(Failure) -> Record {
+        try await adding(grant, key: key, metadata: metadata).record
+    }
+
+    /// Adopts a granted item, stores it under `key` as ``add(_:key:metadata:)`` does, and
+    /// leases it with the access adopting it resolved, so there is no second resolution that
+    /// could fail after the record was saved.
+    public func addAndLease(_ grant: Grant, key: Key, metadata: Metadata) async throws(Failure) -> (record: Record, lease: AccessLease) {
+        let (record, resolved) = try await adding(grant, key: key, metadata: metadata)
+        return (record, registry.lease(for: record.key, resolved: resolved))
+    }
+
+    private func adding(_ grant: Grant, key: Key, metadata: Metadata) async throws(Failure) -> (record: Record, resolved: ResolvedBookmark) {
         let context = try await prepare(grant, excluding: key)
         let resolved = try await adopt(grant, context: context)
-        return try await insert(
+        let record = try await insert(
             Item(data: resolved.data, kind: kind, location: resolved.handle.path, identity: resolved.fileIdentity, status: .available),
             key: key,
             metadata: metadata
         )
+        return (record, resolved)
     }
 
     /// Stores a bookmark another store keeps, such as when an item moves from one list to
@@ -721,6 +734,11 @@ extension BookmarkStore where Metadata == NoMetadata {
     @discardableResult
     public func add(_ grant: Grant, key: Key) async throws(Failure) -> Record {
         try await add(grant, key: key, metadata: NoMetadata())
+    }
+
+    /// Adopts a granted item, stores it under `key` and leases it in one step.
+    public func addAndLease(_ grant: Grant, key: Key) async throws(Failure) -> (record: Record, lease: AccessLease) {
+        try await addAndLease(grant, key: key, metadata: NoMetadata())
     }
 }
 
