@@ -177,7 +177,6 @@ struct GrantValidatorTests {
 
         for refusal in refusals {
             #expect(!refusal.message.isEmpty)
-            #expect(BookmarkError(.refused(refusal)).errorDescription == refusal.message)
         }
         #expect(GrantRefusal.custom("Custom reason").message == "Custom reason")
     }

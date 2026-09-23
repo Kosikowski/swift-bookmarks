@@ -524,10 +524,16 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         }
     }
 
+    /// Moves `key` to the front of a most-recently-used order. The lease it follows stands
+    /// either way, so a failed save only leaves the order as it was.
     private func touch(_ key: Key) async {
         guard policy.ordering == .mostRecentlyUsed, table.order.first != key else { return }
-        _ = try? await mutate { [policy] table throws(Failure) in
-            table.promote(key, ordering: policy.ordering)
+        do {
+            try await mutate { [policy] table throws(Failure) in
+                table.promote(key, ordering: policy.ordering)
+            }
+        } catch {
+            Log.store.error("Saving the order of recent bookmarks failed: \(String(describing: error), privacy: .private)")
         }
     }
 

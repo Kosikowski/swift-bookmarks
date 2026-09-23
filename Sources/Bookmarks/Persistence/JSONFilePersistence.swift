@@ -60,9 +60,8 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
                 guard let records = transform(stored.records) else { return }
                 let encoded = try PersistedEnvelope<Key, Metadata>.encode(records, over: stored, pretty: true)
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-                if keepsLastGoodCopy, FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {
-                    try? FileManager.default.removeItem(at: lastGoodURL)
-                    try? FileManager.default.copyItem(at: url, to: lastGoodURL)
+                if keepsLastGoodCopy {
+                    keepLastGoodCopy(of: url)
                 }
                 try encoded.write(to: url, options: .atomic)
             }
@@ -123,6 +122,19 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
         }
     }
 
+    /// Copies the file at `url` to ``lastGoodURL`` before it's replaced.
+    ///
+    /// The copy is a safety net, so failing to make it doesn't fail the save. It's written
+    /// atomically, so a failure leaves the previous copy whole.
+    private func keepLastGoodCopy(of url: URL) {
+        do {
+            guard let current = try Self.contents(of: url) else { return }
+            try current.write(to: lastGoodURL, options: .atomic)
+        } catch {
+            Log.persistence.error("Keeping the last good copy of \(url.lastPathComponent, privacy: .public) failed: \(String(describing: error), privacy: .private)")
+        }
+    }
+
     /// A name for the quarantined copy of `url` that no earlier quarantine used.
     private func quarantineURL(for url: URL) -> URL {
         let folder = url.deletingLastPathComponent()
@@ -138,14 +150,14 @@ public struct JSONFilePersistence<Key: Hashable & Sendable & Codable, Metadata: 
 
     /// The last good copy, when one is kept and readable.
     private func lastGood() -> (data: Data, stored: StoredRecords<Key, Metadata>)? {
-        guard
-            keepsLastGoodCopy,
-            let data = try? Self.contents(of: lastGoodURL),
-            let stored = try? PersistedEnvelope<Key, Metadata>.decode(data)
-        else {
+        guard keepsLastGoodCopy else { return nil }
+        do {
+            guard let data = try Self.contents(of: lastGoodURL) else { return nil }
+            return (data, try PersistedEnvelope<Key, Metadata>.decode(data))
+        } catch {
+            Log.persistence.error("The last good copy of \(fileURL.lastPathComponent, privacy: .public) can't be read either, so the records start empty: \(String(describing: error), privacy: .private)")
             return nil
         }
-        return (data, stored)
     }
 }
 
@@ -158,7 +170,12 @@ extension JSONFilePersistence {
     /// when its consumer stops iterating. Observing creates the file's folder if it's missing.
     public func changes() -> AsyncStream<Void> {
         let folder = fileURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        } catch {
+            // Without the folder, changes aren't reported until something creates it.
+            Log.persistence.error("Creating the folder of \(fileURL.lastPathComponent, privacy: .public) to observe it failed: \(String(describing: error), privacy: .private)")
+        }
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let presenter = FilePresenter(folder: folder, file: fileURL) { continuation.yield() }
             NSFileCoordinator.addFilePresenter(presenter)

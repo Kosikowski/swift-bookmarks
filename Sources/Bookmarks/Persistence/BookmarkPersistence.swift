@@ -131,7 +131,8 @@ struct PersistedEnvelope<Key: Hashable & Sendable & Codable, Metadata: Sendable 
             }
         }
         if !stored.preserved.isEmpty {
-            Log.persistence.error("Kept \(stored.preserved.count, privacy: .public) stored bookmarks this version can't read")
+            // Expected after a newer version wrote the file, and nothing is lost.
+            Log.persistence.notice("Kept \(stored.preserved.count, privacy: .public) stored bookmarks this version can't read")
         }
         return stored
     }

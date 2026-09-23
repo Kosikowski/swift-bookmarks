@@ -1,6 +1,8 @@
 public import Foundation
 
 /// An error from a ``BookmarkStore``.
+///
+/// Like ``BookmarkError``, it carries no text for users; map the case to your app's wording.
 public enum BookmarkStoreError<Key: Hashable & Sendable>: Error, Sendable {
     /// Creating or resolving the bookmark failed.
     case bookmark(BookmarkError)
@@ -21,20 +23,8 @@ public enum BookmarkStoreError<Key: Hashable & Sendable>: Error, Sendable {
     }
 }
 
-extension BookmarkStoreError: LocalizedError {
-    public var errorDescription: String? {
-        switch self {
-        case .bookmark(let error): error.errorDescription
-        case .duplicate: "The item has already been added."
-        case .notFound: "The item isn't stored."
-        case .differentItem: "A different item was chosen."
-        case .persistence(let error): error.errorDescription
-        case .changedDuringAccess: "The item changed while it was being opened. Try again."
-        }
-    }
-}
-
-/// An error from loading or saving stored records.
+/// An error from loading or saving stored records. Map ``reason`` to your app's wording;
+/// ``description`` is for logs.
 public struct PersistenceError: Error, Sendable, CustomStringConvertible {
     /// What went wrong.
     public enum Reason: Sendable, Hashable {
@@ -51,26 +41,15 @@ public struct PersistenceError: Error, Sendable, CustomStringConvertible {
     /// What went wrong.
     public let reason: Reason
     /// The underlying error.
-    public let underlying: (any Error & Sendable)?
+    public let underlying: (any Error)?
 
     /// Creates an error.
-    public init(_ reason: Reason, underlying: (any Error & Sendable)? = nil) {
+    public init(_ reason: Reason, underlying: (any Error)? = nil) {
         self.reason = reason
         self.underlying = underlying
     }
 
     public var description: String {
         "PersistenceError(\(reason)\(underlying.map { ", underlying: \($0)" } ?? ""))"
-    }
-}
-
-extension PersistenceError: LocalizedError {
-    public var errorDescription: String? {
-        switch reason {
-        case .unreadable: "The saved locations are damaged."
-        case .unsupportedSchemaVersion: "The saved locations were written by a newer version of the app."
-        case .readFailed: "The saved locations couldn't be read."
-        case .writeFailed: "The locations couldn't be saved."
-        }
     }
 }

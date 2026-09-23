@@ -73,7 +73,10 @@ struct RegressionTests {
     @Test func contentionHasItsOwnError() {
         let error = BookmarkStoreError<String>.changedDuringAccess("a")
 
-        #expect(error.errorDescription?.contains("Try again") == true)
+        guard case .changedDuringAccess("a") = error else {
+            Issue.record("Expected changedDuringAccess, got \(error)")
+            return
+        }
         #expect(error.bookmarkFailure == nil)
     }
 }

@@ -8,8 +8,9 @@ public enum BookmarkLogging {
 
     /// The `os.Logger` subsystem of the library's messages.
     ///
-    /// Defaults to the main bundle identifier followed by `.bookmarks`. Set it at launch,
-    /// before the library logs anything.
+    /// Defaults to the main bundle identifier followed by `.bookmarks`, so the library's
+    /// messages sit next to the app's own in Console instead of under a subsystem shared by
+    /// every app that uses it. Set it at launch, before the library logs anything.
     public static var subsystem: String {
         get { configuredSubsystem.withLock { $0 } }
         set { configuredSubsystem.withLock { $0 = newValue } }

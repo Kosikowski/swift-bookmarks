@@ -772,6 +772,33 @@ struct JSONFilePersistenceTests {
         #expect(try persistence.load() == [sampleRecords()[0]])
     }
 
+    @Test func aLastGoodCopyThatCantBeWrittenDoesntFailTheSave() throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+        try persistence.save(sampleRecords())
+        // A folder in the copy's place makes writing it fail.
+        try FileManager.default.createDirectory(at: persistence.lastGoodURL.appending(path: "Blocker"), withIntermediateDirectories: true)
+
+        try persistence.save([sampleRecords()[1]])
+
+        #expect(try persistence.load() == [sampleRecords()[1]])
+        var isDirectory: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: persistence.lastGoodURL.path(percentEncoded: false), isDirectory: &isDirectory))
+        #expect(isDirectory.boolValue)
+    }
+
+    @Test func eachSaveKeepsTheVersionBeforeIt() throws {
+        defer { cleanUp() }
+        let persistence = persistence()
+        try persistence.save([sampleRecords()[0]])
+        try persistence.save([sampleRecords()[1]])
+
+        try persistence.save([])
+
+        let lastGood = try PersistedEnvelope<String, Tag>.decode(Data(contentsOf: persistence.lastGoodURL)).records
+        #expect(lastGood == [sampleRecords()[1]])
+    }
+
     @Test func anUpdateThatReturnsNothingKeepsTheLastGoodCopy() throws {
         defer { cleanUp() }
         let persistence = persistence()
@@ -1104,25 +1131,20 @@ struct StoreErrorTests {
         #expect(BookmarkStoreError<String>.notFound("a").bookmarkFailure == nil)
     }
 
-    @Test func everyCaseHasAMessage() {
-        let errors: [BookmarkStoreError<String>] = [
-            .bookmark(BookmarkError(.denied)), .duplicate(of: "a"), .notFound("a"), .differentItem("a"),
-            .persistence(PersistenceError(.writeFailed)),
-        ]
+    @Test func carryNoTextForUsers() {
+        let errors: [any Error] = [BookmarkStoreError<String>.notFound("a"), PersistenceError(.writeFailed)]
 
         for error in errors {
-            #expect(error.errorDescription?.isEmpty == false)
+            #expect(!(error is any LocalizedError))
         }
     }
 
-    @Test func persistenceErrorsDescribeThemselves() {
+    @Test func persistenceErrorsDescribeThemselvesForLogs() {
         let error = PersistenceError(.unsupportedSchemaVersion(4), underlying: CocoaError(.fileReadCorruptFile))
 
         #expect(error.description.contains("unsupportedSchemaVersion(4)"))
-        #expect(error.errorDescription?.contains("newer") == true)
-        for reason in [PersistenceError.Reason.unreadable, .readFailed, .writeFailed] {
-            #expect(PersistenceError(reason).errorDescription?.isEmpty == false)
-        }
+        #expect(error.description.contains("underlying"))
+        #expect(PersistenceError(.readFailed).description == "PersistenceError(readFailed)")
     }
 
 }

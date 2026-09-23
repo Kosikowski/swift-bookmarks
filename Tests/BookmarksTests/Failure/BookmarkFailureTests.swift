@@ -113,27 +113,9 @@ struct BookmarkErrorTests {
         #expect(BookmarkError(.denied).description == "BookmarkError(denied)")
     }
 
-    @Test(arguments: [
-        BookmarkFailure.missing, .volumeUnavailable(name: nil), .needsRegrant, .denied, .corrupt, .timedOut, .cancelled,
-    ])
-    func everyClassifiedFailureHasAMessage(_ failure: BookmarkFailure) {
-        let message = BookmarkError(failure).errorDescription
+    @Test func carriesNoTextForUsers() {
+        let error: any Error = BookmarkError(.missing)
 
-        #expect(message?.isEmpty == false)
-    }
-
-    @Test func volumeMessageNamesTheVolume() {
-        #expect(BookmarkError(.volumeUnavailable(name: "Backup")).errorDescription?.contains("Backup") == true)
-    }
-
-    @Test func unsupportedMessageIsTheReason() {
-        #expect(BookmarkError(.unsupported(reason: "Needs macOS.")).errorDescription == "Needs macOS.")
-    }
-
-    @Test func otherFailureUsesTheUnderlyingMessage() {
-        let underlying = NSError(domain: "D", code: 1, userInfo: [NSLocalizedDescriptionKey: "Something broke"])
-
-        #expect(BookmarkError(.other(domain: "D", code: 1), underlying: underlying).errorDescription == "Something broke")
-        #expect(BookmarkError(.other(domain: "D", code: 1)).errorDescription == nil)
+        #expect(!(error is any LocalizedError))
     }
 }

@@ -55,6 +55,8 @@ extension BookmarkStore {
             guard case .mounted = event else { continue }
             do {
                 try await refreshStatuses()
+            } catch where error.bookmarkFailure == .cancelled {
+                return
             } catch {
                 Log.store.error("Refreshing statuses after a mount failed: \(String(describing: error), privacy: .private)")
             }

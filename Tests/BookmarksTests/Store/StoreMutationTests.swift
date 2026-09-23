@@ -224,6 +224,20 @@ struct StoreMutationTests {
             #expect(try await harness.store.keys() == ["a", "b"])
         }
 
+        @Test func aLeaseStandsWhenSavingTheNewOrderFails() async throws {
+            try await harness.add("a", "/A")
+            try await harness.add("b", "/B")
+            harness.persistence.failSaves(1)
+
+            let lease = try await harness.store.lease("a")
+
+            #expect(lease.isActive)
+            #expect(try await harness.store.keys() == ["b", "a"])
+            #expect(harness.saved.map(\.key) == ["b", "a"])
+            lease.end()
+            #expect(harness.engine.isBalanced)
+        }
+
         @Test func evictsTheOldestBeyondTheLimit() async throws {
             for name in ["a", "b", "c"] {
                 try await harness.add(name, "/\(name)")

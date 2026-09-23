@@ -70,7 +70,7 @@ public final class ScopeLedger: Sendable {
             return entries.values.count { $0.started }
         }
         if count > softLimit, !warned.exchange(true, ordering: .relaxed) {
-            Log.access.warning("\(count, privacy: .public) security scopes are active; the kernel limit is near")
+            Log.access.error("\(count, privacy: .public) security scopes are active; the kernel limit is near")
         }
     }
 

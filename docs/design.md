@@ -143,9 +143,11 @@ public enum BookmarkFailure: Sendable, Hashable {
 public struct BookmarkError: Error, Sendable {
     public let failure: BookmarkFailure
     public let lastKnownPath: String?    // from recordedValues, for UI and re-grant
-    public let underlying: (any Error & Sendable)?
+    public let underlying: (any Error)?
 }
 ```
+
+Errors carry facts for code and logs, not text for users: none of the error types is `LocalizedError`, and apps map `failure` to their own wording (§1 non-goals). `BookmarkFailure` may gain cases, so a `switch` over it needs a `default:` branch, or can switch on `recommendation` instead.
 
 Classification uses the error code **and** `recordedValues` (does the recorded volume path exist?), so a missing volume is `.volumeUnavailable`, not `.missing`.
 

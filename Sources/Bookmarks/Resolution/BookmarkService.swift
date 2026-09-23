@@ -449,7 +449,9 @@ extension BookmarkService {
             )
         } catch {
             let failure = classifier.classify(error, recorded: nil)
-            Log.resolution.error("Refreshing a stale bookmark failed: \(failure.caseName, privacy: .public)")
+            // Recovered: the stale bytes still resolve, and the failure is reported through
+            // ResolvedBookmark.refreshError.
+            Log.resolution.notice("Refreshing a stale bookmark failed: \(failure.caseName, privacy: .public)")
             throw BookmarkError(failure, lastKnownPath: url.path(percentEncoded: false), underlying: error as NSError)
         }
     }

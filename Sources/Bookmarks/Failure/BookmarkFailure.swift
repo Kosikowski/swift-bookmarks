@@ -2,6 +2,9 @@
 ///
 /// A failure encodes as an object whose `code` is the case name, which never changes once
 /// released. Decoding an unknown code fails, so readers must be ready for cases added later.
+///
+/// Later versions may add cases. Give a `switch` over failures a `default:` branch, or switch
+/// on ``recommendation``, which every case maps to.
 public enum BookmarkFailure: Sendable, Hashable, Codable {
     /// The item no longer exists on a mounted volume.
     case missing
