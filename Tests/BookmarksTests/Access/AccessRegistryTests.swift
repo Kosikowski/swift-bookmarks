@@ -199,3 +199,30 @@ struct AccessRegistryTests {
         #expect(registry.activeKeys.isEmpty)
     }
 }
+
+@Suite("AccessRegistry soft limit")
+struct AccessRegistrySoftLimitTests {
+    @Test func flagsWhenStartedScopesExceedTheSoftLimit() {
+        let engine = Fixtures.engine()
+        let registry = AccessRegistry<Int>(engine: engine, softLimit: 2)
+        let leases = (0..<3).map { index -> AccessLease in
+            engine.addItem(at: "/Items/\(index)")
+            return registry.lease(for: index, url: engine.grant("/Items/\(index)", origin: .fileImporter).url)
+        }
+
+        #expect(registry.hasExceededSoftLimit)
+        leases.forEach { $0.end() }
+        #expect(engine.isBalanced)
+    }
+
+    @Test func staysQuietBelowTheSoftLimit() {
+        let engine = Fixtures.engine()
+        let registry = AccessRegistry<Int>(engine: engine, softLimit: 2)
+        engine.addItem(at: "/Items/0")
+
+        let lease = registry.lease(for: 0, url: engine.grant("/Items/0", origin: .fileImporter).url)
+
+        #expect(!registry.hasExceededSoftLimit)
+        lease.end()
+    }
+}

@@ -97,6 +97,11 @@ public final class AccessRegistry<Key: Hashable & Sendable>: Sendable {
         handles.withLock { $0.values.count { $0.holdsStartedScope } }
     }
 
+    /// Whether the number of started scopes has exceeded the soft limit at some point.
+    public var hasExceededSoftLimit: Bool {
+        warnedAboutLimit.load(ordering: .relaxed)
+    }
+
     private func remove(_ handle: ScopeHandle, for key: Key) {
         handles.withLock { handles in
             if let current = handles[key], current === handle, handle.isIdle {

@@ -89,10 +89,6 @@ final class ScopeHandle: Sendable {
         state.withLock { $0.holders > 0 && $0.didStart }
     }
 
-    var holderCount: Int {
-        state.withLock { $0.holders }
-    }
-
     private func stopIfStarted(_ state: inout State) {
         if state.didStart {
             engine.stopAccessing(url)
