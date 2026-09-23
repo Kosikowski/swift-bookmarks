@@ -37,24 +37,24 @@ let lease = try await store.lease(id)
 defer { lease.end() }
 ```
 
-Records keep their key when bookmarks are refreshed or re-granted. A record that fails to resolve stays in the store with `status == .unavailable(failure, since:)` unless the policy drops it:
+`BookmarkStore` is an actor: reads and changes are `async`, and persistence runs off the calling thread. Call `try await store.load()` at launch to read the records early. Records keep their key when bookmarks are refreshed or re-granted. A record that fails to resolve stays in the store with `status == .unavailable(failure, since:)` unless the policy drops it:
 
 ```swift
 switch record.status.failure {
 case .volumeUnavailable?: // show "disk not connected", retry after VolumeEvents reports a mount
 case .needsRegrant?, .denied?: try await store.regrantWithOpenPanel(record.key, message: "Find “\(record.displayName)”")
-case .missing?: try store.forget(record.key)
+case .missing?: try await store.forget(record.key)
 default: break
 }
 ```
 
 ## Keeping your own storage format
 
-Use `Bookmarks` directly when bookmark bytes live inside your own documents or settings. The bytes are plain Apple bookmark data, so existing values keep working.
+Use `BookmarkService` directly when bookmark bytes live inside your own documents or settings. The bytes are plain Apple bookmark data, so existing values keep working.
 
 ```swift
-let bookmarks = Bookmarks()
-let resolved = try await bookmarks.resolve(savedData)
+let service = BookmarkService()
+let resolved = try await service.resolve(savedData)
 if resolved.needsPersisting { save(resolved.data) }
 let lease = resolved.beginAccess()
 ```
@@ -63,7 +63,7 @@ Or conform your existing store to `BookmarkPersistence` and keep its format byte
 
 ## Other scenarios
 
-- `DocumentBookmarks`: document-scoped bookmarks to files referenced from a document.
+- `DocumentBookmarks`: document-scoped bookmarks to files referenced from a document. It's the only way to anchor a bookmark on a document.
 - `Handoff`: tokens that pass access to an XPC service or helper.
 - `AliasFiles`: Finder alias files.
 - `VolumeEvents`: mount and unmount notifications (macOS).
@@ -74,13 +74,13 @@ Or conform your existing store to `BookmarkPersistence` and keep its format byte
 ```swift
 let engine = FakeBookmarkEngine()
 engine.addItem(at: "/Users/me/Project")
-let store = BookmarkStore<String, NoMetadata>(persistence: InMemoryPersistence(), bookmarks: Bookmarks(engine: engine))
+let store = BookmarkStore<String, NoMetadata>(persistence: InMemoryPersistence(), service: BookmarkService(engine: engine))
 
 try await store.add(engine.grant("/Users/me/Project", origin: .openPanel), key: "project")
 engine.moveItem(from: "/Users/me/Project", to: "/Users/me/Renamed")
 try await store.lease("project").end()
 
-#expect(engine.isBalanced)
+#expect(engine.isBalanced, "\(engine.balanceReport)")
 ```
 
 ## Development

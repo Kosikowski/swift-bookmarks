@@ -116,12 +116,12 @@ public struct ResolutionPolicy: Sendable, Hashable {
 ```swift
 public final class BlockingExecutor: Sendable {
     public static let shared: BlockingExecutor   // dedicated concurrent queue, width 4
-    public func run<T: Sendable>(_ work: @Sendable @escaping () throws -> T,
-                                 timeout: Duration? = nil) async throws -> T
+    public func run<T: Sendable>(timeout: Duration? = nil,
+                                 _ work: @Sendable @escaping () throws -> T) async throws -> T
 }
 ```
 
-OS calls can't be cancelled. On timeout the awaiting caller gets `BookmarkFailure.timedOut` while the work finishes in the background; its result is discarded, and single-flight (§6.3) stops a pile-up of hung resolves on the same bookmark.
+OS calls can't be cancelled. On timeout the awaiting caller gets `BookmarkFailure.timedOut` while the work finishes in the background; its result is discarded, and single-flight (§6.3) stops a pile-up of hung resolves on the same bookmark. A caller that is already cancelled never enqueues its work. The store's persistence calls run on the same executor but always to completion, so a cancelled caller can't leave memory and disk out of step.
 
 ### 4.4 Failures
 
@@ -154,14 +154,15 @@ Classification uses the error code **and** `recordedValues` (does the recorded v
 For callers that store bookmark bytes inside their own formats.
 
 ```swift
-public struct Bookmarks: Sendable {
+public struct BookmarkService: Sendable {
     public init(engine: any BookmarkEngine = SystemBookmarkEngine(),
-                executor: BlockingExecutor = .shared)
+                executor: BlockingExecutor = .shared, timeout: Duration? = nil)
 
-    public func create(for grant: Grant, kind: BookmarkKind = .persistentDefault) async throws -> BookmarkData
-    public func resolve(_ data: BookmarkData, kind: BookmarkKind = .persistentDefault,
-                        policy: ResolutionPolicy = .init()) async throws(BookmarkError) -> ResolvedBookmark
-    public func availability(of data: BookmarkData, kind: BookmarkKind) async -> Availability
+    public func create(for grant: Grant, kind: BookmarkKind? = nil, …) async throws(BookmarkError) -> BookmarkData
+    public func adopt(_ grant: Grant, kind: BookmarkKind? = nil, …) async throws(BookmarkError) -> ResolvedBookmark
+    public func resolve(_ data: BookmarkData, kind: BookmarkKind? = nil,
+                        policy: ResolutionPolicy = .default) async throws(BookmarkError) -> ResolvedBookmark
+    public func availability(of data: BookmarkData, kind: BookmarkKind? = nil) async -> Availability
 }
 
 public final class ResolvedBookmark: Sendable {
@@ -175,7 +176,7 @@ public final class ResolvedBookmark: Sendable {
 }
 ```
 
-`ResolvedBookmark` deliberately has no public `url`. The URL is reachable only through a lease (R2).
+`ResolvedBookmark` deliberately has no public `url`. The URL is reachable only through a lease (R2). The service takes no document anchor: document-scoped bookmarks go through `DocumentBookmarks` (§9.1), so an anchor can't turn another kind into a document-scoped bookmark by accident. The service isn't called `Bookmarks` because a type named like its module breaks module-qualified names such as `Bookmarks.Grant`.
 
 `Availability` is `.available`, `.volumeUnavailable(name)`, `.missing`, `.needsRegrant`, `.unknown`. It resolves with `.withoutMounting` and doesn't start access, so it's cheap enough for tiles and banners.
 
@@ -194,9 +195,10 @@ public final class AccessLease: Sendable {
     public func end()          // idempotent; ends on deinit as a safety net
 }
 
-extension Bookmarks {
-    public func withAccess<T: Sendable>(_ data: BookmarkData, kind: BookmarkKind = .persistentDefault,
-                                        _ body: (URL) async throws -> T) async throws -> T
+extension BookmarkService {
+    public func withAccess<T>(to data: BookmarkData, kind: BookmarkKind? = nil,
+                              policy: ResolutionPolicy = .default,
+                              _ body: (URL) async throws -> T) async throws -> T
 }
 ```
 
@@ -205,7 +207,7 @@ extension Bookmarks {
 `AccessRegistry` is a `Mutex`-protected, synchronous, `Sendable` class, so the main actor and non-isolated code can use it without hopping.
 
 - One OS start per **key**, with an internal refcount of leases (R3). The first lease starts, the last `end()` stops.
-- Holds the resolved URL instance for the key so later leases reuse it instead of re-resolving.
+- Holds the resolved URL instance for the key so later leases reuse it instead of re-resolving. `lease(for:resolved:)` adopts the scope of a `ResolvedBookmark`, so an implicit start taken during resolution is balanced by the same leases.
 - `lease(covering: url)` returns a lease on an already-open ancestor when one exists (R10).
 - `activeScopeCount` for diagnostics; logs a warning past a soft limit (default 500).
 - `endAll()` for termination, ordered after caller-supplied shutdown hooks.
@@ -220,31 +222,35 @@ Concurrent resolves of the same key share one engine call and one refresh. So a 
 For apps that want the library to own the keyed collection (most of them).
 
 ```swift
-public final class BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable>: Sendable {
+public actor BookmarkStore<Key: Hashable & Sendable & Codable, Metadata: Sendable & Codable> {
     public init(persistence: some BookmarkPersistence<Key, Metadata>,
-                kind: BookmarkKind = .persistentDefault,
-                policy: StorePolicy = .init(),
-                bookmarks: Bookmarks = .init())
+                kind: BookmarkKind? = nil,
+                policy: StorePolicy = .default,
+                service: BookmarkService = .init())
+
+    public func load() async throws(BookmarkStoreError<Key>)          // optional; reads load on first use
+    public func reload() async throws(BookmarkStoreError<Key>)        // after another process wrote
 
     // Adding and re-granting
     public func add(_ grant: Grant, key: Key, metadata: Metadata) async throws -> BookmarkRecord<Key, Metadata>
     public func add(_ grant: Grant, metadata: Metadata) async throws -> BookmarkRecord<Key, Metadata> where Key == BookmarkID
     public func regrant(_ key: Key, with grant: Grant) async throws   // same key and metadata, new bytes
-    public func forget(_ key: Key) async throws
+    public func forget(_ key: Key) async throws -> Bool
 
     // Access
     public func lease(_ key: Key) async throws(BookmarkStoreError<Key>) -> AccessLease
-    public func withAccess<T: Sendable>(_ keys: [Key], _ body: ([Key: URL]) async throws -> T) async throws -> T
+    public func lease(covering url: URL) async throws(BookmarkStoreError<Key>) -> AccessLease?
+    public func withAccess<T>(to keys: [Key], _ body: ([Key: URL]) async throws -> T) async throws -> T
 
     // Reading
-    public func records() throws(BookmarkStoreError<Key>) -> [BookmarkRecord<Key, Metadata>]   // includes unresolved ones
+    public func records() async throws(BookmarkStoreError<Key>) -> [BookmarkRecord<Key, Metadata>]   // includes unresolved ones
     public func record(_ key: Key) async throws -> BookmarkRecord<Key, Metadata>?
     public func key(matching url: URL) async throws -> Key?                  // by file identity, then path
-    public func updateMetadata(_ key: Key, _ change: (inout Metadata) -> Void) async throws
-    public func availability(_ key: Key) async -> Availability
+    public func updateMetadata(_ key: Key, _ change: sending (inout Metadata) -> Void) async throws
+    public func availability(_ key: Key) async throws -> Availability
     public func refreshStatuses() async throws(BookmarkStoreError<Key>) -> [Key]  // e.g. on volume mount
 
-    public var changes: AsyncStream<StoreChange<Key>> { get }
+    public nonisolated func changes(bufferingPolicy: …= .unbounded) -> AsyncStream<StoreChange<Key>>
 }
 
 public struct BookmarkRecord<Key, Metadata>: Sendable, Codable {
@@ -269,7 +275,7 @@ Store behaviour:
 - **Duplicates by file identity**, not case-insensitive path.
 - **Optional ordering and limit** (`StorePolicy.limit`) for recents lists.
 - **Validators** run on `add` and `regrant` (§9.3).
-- **Writes are serialised** and the in-memory state only changes after persistence succeeds.
+- **Writes are serialised** and the in-memory state only changes after persistence succeeds. The actor is reentrant at the persistence `await`, so an async lock keeps writes in order; reads see the last saved state and never wait for a save.
 
 ### 7.1 Persistence
 
@@ -291,7 +297,9 @@ Built in:
 
 **Adapters for existing formats.** An app keeps its current format by writing a small `BookmarkPersistence` that maps its stored shape to `BookmarkRecord` and back. Fields the library adds (status, identity, dates) that the old format can't hold are recomputed at load. This is the compatibility contract: **existing bytes, keys and ids are read and written unchanged.**
 
-A `SchemaMigration` hook runs once on load for apps changing format later, and never deletes the legacy value until the migrated value is saved.
+`MigratingPersistence` imports legacy records once on load for apps changing format later, and never deletes the legacy value until the migrated value is saved. It requires a `MigrationMarker`, so a store the user empties isn't refilled from legacy data.
+
+The store calls `load()` and `save(_:)` on the blocking executor, one at a time, so adapters can do synchronous I/O.
 
 ## 8. Grants: where URLs come from
 
@@ -300,7 +308,8 @@ public struct Grant: Sendable {
     public let url: URL
     public let origin: Origin
     public enum Origin: Sendable {
-        case openPanel, savePanel, drop, dockOrFinderOpen   // macOS: already started
+        case openPanel, savePanel, appKitDrop, finderOpen   // macOS: already started
+        case swiftUIDrop                                    // unverified: the library starts it
         case fileImporter, documentPicker                   // not started
         case implicitBookmark                               // started on resolve
         case alreadyAccessible                              // app already reaches it (unsandboxed, container)
@@ -315,7 +324,7 @@ Save panels return URLs for files that don't exist yet; bookmark creation fails 
 ## 9. Scenarios
 
 ### 9.1 Document-scoped bookmarks (macOS)
-`DocumentBookmarks(document: URL)` creates and resolves `.documentScoped` bookmarks to files referenced from a document. It checks the rules up front (targets must be files; the anchor must be a file; entitlement present) and returns `.unsupported` rather than a raw 256. The docs note that tools stripping extended attributes break these.
+`DocumentBookmarks(document: URL)` creates and resolves `.documentScoped` bookmarks to files referenced from a document, and is the only API that takes a document anchor. It checks the rules it can up front (targets must be files; the anchor must be a file) and fails with `.unsupported` or `.refused`. A missing document-scope entitlement surfaces as `.denied`, the system's 256. The docs note that tools stripping extended attributes break these.
 
 ### 9.2 Handoff to helpers and extensions
 - `Handoff.makeToken(for lease: AccessLease) -> BookmarkData` creates an `.implicit` bookmark for sending to an XPC service or login item. It's a bearer token valid until reboot, so it's never persisted (R9).
@@ -344,9 +353,9 @@ Validators return typed refusals; the app supplies the copy.
 
 ## 10. UI helpers (`BookmarksUI`)
 
-- `FolderPicker.chooseFolder(…) async -> Grant?` and `chooseFile(types:)`: `NSOpenPanel` via `begin()` on macOS; `UIDocumentPickerViewController` on iOS.
+- `OpenPanelPicker.choose(_:attachedTo:) async -> [Grant]` on macOS and `DocumentPicker.choose(_:from:) async -> [Grant]` on iOS, configured by `PickerConfiguration`.
 - `.bookmarkImporter(isPresented:configuration:onGrants:onFailure:)`: SwiftUI `fileImporter` wrapper that produces `Grant`s with the right origin.
-- `.bookmarkDropDestination(onGrant:)`: drop wrapper with origin `.drop`.
+- `.bookmarkDropDestination(onDrop:)`: drop wrapper with origin `.swiftUIDrop`.
 - `BookmarkStore.regrantWithOpenPanel(_:message:prompt:attachedTo:)`: opens the panel at the record's last known location, with a message the app supplies, and calls `store.regrant`. `StorePolicy.requiresSameItemOnRegrant` checks that the user picked the same file identity.
 
 ## 11. Testing
@@ -354,8 +363,8 @@ Validators return typed refusals; the app supplies the copy.
 `BookmarksTesting`:
 
 - `FakeBookmarkEngine`: bookmark bytes are the path; scriptable stale, failure per path, hangs with gates, sandboxed/unsandboxed mode. It only accepts `start` on URLs it issued from `resolve` or intake, and records every start and stop.
-- `assertBalanced(engine)` fails a test if any start lacks a stop or any stop lacks a start.
-- `StubPicker` for UI flows; `InMemoryPersistence` for stores.
+- `engine.isBalanced` and `engine.balanceReport` show whether every start has one stop; the report describes outstanding starts, unbalanced stops and starts on unissued URLs, so `#expect(engine.isBalanced, "\(engine.balanceReport)")` fails readably. The package doesn't import `Testing`.
+- `engine.grant(_:origin:)` stands in for pickers in UI-flow tests; `InMemoryPersistence` for stores.
 
 `IntegrationHost` is a sandboxed macOS app (and an iOS app) with a scenario runner. It exists to answer, on real signed builds, the questions the research couldn't verify:
 
@@ -370,37 +379,35 @@ The answers feed back into `Grant` intake and the fake engine, so unit tests sta
 
 ## 12. Concurrency summary
 
-- Public types are `Sendable`; state lives behind `Mutex` (registry, store cache) so both sync and async callers work.
+- Public types are `Sendable`. `BookmarkStore` is an actor; `AccessRegistry` stays a `Mutex`-protected class so leases can start and end synchronously from any context.
 - Blocking OS calls go through `BlockingExecutor`, never the store's lock and never the main actor (R7).
-- After every await, the store re-checks a per-key generation counter, so a `forget` or `regrant` that lands mid-resolve isn't undone.
+- After every await, the store re-checks a per-key generation counter, so a `forget` or `regrant` that lands mid-resolve isn't undone. Single-flight is keyed by key and generation, so a caller never joins a resolution of bytes that were replaced.
 - Closure parameters are `sending` or `@Sendable` as appropriate; no `@unchecked Sendable` in public API.
 
 ## 13. Logging and privacy
 
-`os.Logger` with a caller-configurable subsystem. Paths are logged with `privacy: .private`. The library never logs bookmark bytes.
+`os.Logger` with a subsystem set through `BookmarkLogging.subsystem`, defaulting to the main bundle identifier plus `.bookmarks`. Failure case names are public; paths, volume names and underlying errors are `.private`. The library never logs bookmark bytes.
 
 ## 14. Open questions
 
 - **Minimum OS:** raising the floor above macOS 15 would allow dropping some availability checks.
-- **Actor vs Mutex for the store.** The design uses `Mutex` so call sites stay synchronous. If callers can await, an actor would be simpler.
+- **Actor vs Mutex for the store.** Settled: the store is an actor, so its reads are `async`.
 - **Whether `BookmarksUI` should wrap `NSDocument`/recent documents.** Nothing needs it yet; `recentDocumentURLs` leaks extensions (research §5), so a helper would have to avoid it.
 
 ## 15. Implementation notes
 
 Where the code differs from the sketches above:
 
-- **Engine:** `BookmarkEngine` takes Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. It also inspects items (`itemInfo(at:)`, `fileIdentity(of:)`, `itemExists(atPath:)`) and reads and writes alias files, so every file system call goes through one seam.
+- **Engine:** `BookmarkEngine` takes Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. It also inspects items (`itemInfo(at:)`, `fileIdentity(of:)`, `itemExists(atPath:)`) and reads and writes alias files, so every file system call goes through one seam. Engines must not call back into the library, because starts and stops run under its locks.
 - **Default kind:** `BookmarkKind.persistentDefault(for:)` takes the environment; the static property uses the current process.
 - **Failures:** `BookmarkFailure` also has `.refused(GrantRefusal)` for validator refusals and `.cancelled` for callers that stop waiting.
-- **Validators** run inside `Bookmarks.adopt` and `Bookmarks.create`, while access to the item is held, through `validators:` and `context:` parameters. They inspect items through `BookmarkEngine.itemInfo(at:)`.
+- **Validators** run inside `BookmarkService.adopt` and `create`, while access to the item is held, through `validators:` and `context:` parameters. They inspect items through `BookmarkEngine.itemInfo(at:)`. `.notTooBroad` refuses every top-level folder, other users' homes and second-level system folders as well as the home folder and its ancestors.
 - **Grant origins:** `Grant.isStartedBySystem(on:)` takes the platform, so tests can check every platform on one machine.
-- **Store:** a `Mutex`-based `final class` (the open question in §14). Reads, metadata updates, reordering and forgetting are synchronous; anything that talks to the system is `async`. Errors are `BookmarkStoreError<Key>`. The resolution policy comes from `StorePolicy.resolution`, not a per-call argument, and the store never lets resolution start implicit access.
-- **Store locking:** the in-memory state and the write path have separate locks. Writes, including persistence I/O, are serialised on the write lock; reads only take the state lock, so they never wait for a save. Persistence must not call back into the store. A lease whose record keeps changing during resolution fails with `BookmarkStoreError.changedDuringAccess` rather than `.notFound`.
-- **Grants consumed by helpers:** `DocumentBookmarks.create(for:)` and `AliasFiles.write(aliasTo:at:)` relinquish their grant whether or not they succeed, like `adopt`. `Bookmarks.relinquish(_:)` also takes a sequence, for the rejected items of a multi-item drop or panel.
+- **Store:** an actor whose bookkeeping lives in an internal `RecordTable` value type. Errors are `BookmarkStoreError<Key>`. The resolution policy comes from `StorePolicy.resolution`, not a per-call argument, and the store never lets resolution start implicit access. A lease whose record keeps changing during resolution fails with `BookmarkStoreError.changedDuringAccess` rather than `.notFound`. `lease(covering:)` falls back to a shallower stored folder when the deepest one doesn't resolve.
+- **Grants consumed by helpers:** `DocumentBookmarks.create(for:)` and `AliasFiles.write(aliasTo:at:)` relinquish their grant whether or not they succeed, like `adopt`. `BookmarkService.relinquish(_:)` also takes a sequence, for the rejected items of a multi-item drop or panel.
 - **Implicit starts:** a resolved bookmark whose implicit start was never taken over by a lease stops it when released.
-- **Migrations:** `MigratingPersistence` takes a `MigrationMarker` (`.userDefaults(key:suiteName:)` or custom closures) so a store the user empties isn't refilled from legacy data that wasn't removed. `.cleanUpOnly` relies on the clean-up alone.
 - **Save panels:** there is no `commitWrite()`. Callers write the file first, then create or adopt the bookmark.
 - **Unsandboxed builds** default to `.reference` bookmarks.
 - **System engine:** resource values are read without `URL`'s cache, because cached values hid identity changes after atomic saves.
-- **UI:** `OpenPanelPicker`, `DocumentPicker`, `RegrantConfiguration`, `GrantMapping`, `bookmarkImporter` and `bookmarkDropDestination`.
+- **UI:** `OpenPanelPicker`, `DocumentPicker`, `RegrantConfiguration`, `GrantMapping`, `bookmarkImporter` and `bookmarkDropDestination`. The document picker resumes with no grants when it's dismissed without a delegate callback.
 - **Integration host:** `IntegrationHost/` is an XcodeGen project; see its README for the probes.
