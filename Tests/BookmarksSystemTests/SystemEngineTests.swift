@@ -276,7 +276,7 @@ struct SystemEngineTests {
             defer { sandbox.remove() }
             let folder = try sandbox.makeDirectory("Folder")
             let values = try folder.resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
-            let expected = try #require(values.volumeSupportsCaseSensitiveNames)
+            let expected = try #require(values.volumeSupportsCaseSensitiveNames as Bool?)
 
             #expect(engine.namesAreCaseSensitive(at: folder) == expected)
             #expect(engine.namesAreCaseSensitive(at: folder.appending(path: "Missing/Deeper")) == expected)

@@ -14,23 +14,21 @@ struct AsyncLockTests {
 
     @Test func serialisesBodiesAcrossSuspensionPoints() async {
         let lock = AsyncLock()
-        let inside = Atomic(0)
-        let peak = Atomic(0)
+        let gauge = ConcurrencyGauge()
 
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<20 {
                 group.addTask {
                     await lock.withLock {
-                        let now = inside.add(1, ordering: .relaxed).newValue
-                        _ = peak.max(now, ordering: .relaxed)
+                        gauge.enter()
                         await Task.yield()
-                        inside.subtract(1, ordering: .relaxed)
+                        gauge.leave()
                     }
                 }
             }
         }
 
-        let observedPeak = peak.load(ordering: .relaxed)
+        let observedPeak = gauge.peak
         #expect(observedPeak == 1)
     }
 

@@ -178,24 +178,22 @@ struct BlockingExecutorTests {
 
     @Test func limitsConcurrencyToItsWidth() async throws {
         let executor = BlockingExecutor(label: "test", width: 2)
-        let running = Atomic(0)
-        let peak = Atomic(0)
+        let gauge = ConcurrencyGauge()
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             for _ in 0..<8 {
                 group.addTask {
                     try await executor.run {
-                        let now = running.add(1, ordering: .relaxed).newValue
-                        _ = peak.max(now, ordering: .relaxed)
+                        gauge.enter()
                         Thread.sleep(forTimeInterval: 0.01)
-                        running.subtract(1, ordering: .relaxed)
+                        gauge.leave()
                     }
                 }
             }
             try await group.waitForAll()
         }
 
-        let observedPeak = peak.load(ordering: .relaxed)
+        let observedPeak = gauge.peak
         #expect((1...2).contains(observedPeak))
     }
 
