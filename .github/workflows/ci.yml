@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Test (macOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Test
+        run: swift test
+
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: iOS
+            destination: generic/platform=iOS
+          - name: visionOS
+            destination: generic/platform=visionOS
+          - name: Mac Catalyst
+            destination: generic/platform=macOS,variant=Mac Catalyst
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: xcodebuild build -scheme swift-bookmarks-Package -destination '${{ matrix.destination }}'

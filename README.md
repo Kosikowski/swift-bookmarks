@@ -4,6 +4,14 @@ URL bookmarks and security-scoped access for macOS, Mac Catalyst, iOS/iPadOS and
 
 Swift 6, macOS 15 / iOS 18 / visionOS 2 / Mac Catalyst 18.
 
+## Installation
+
+```swift
+.package(url: "https://github.com/Kosikowski/swift-bookmarks.git", from: "0.1.0")
+```
+
+Then add `Bookmarks`, `BookmarksUI` and `BookmarksTesting` to the targets that need them. `BookmarksTesting` belongs in test targets.
+
 ## Products
 
 | Product | What it's for |
@@ -100,3 +108,7 @@ swift test                      # unit, fake-engine, UI and system tests
 
 - [Research](docs/research/README.md): how Apple's bookmark APIs behave, with sources and experiments.
 - [Design](docs/design.md): the package design and implementation notes.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
