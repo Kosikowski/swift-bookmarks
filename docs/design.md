@@ -1,6 +1,6 @@
 # swift-bookmarks — design
 
-Status: implemented, 2026-09-23 (see §15 for where the code differs from this sketch). Inputs: [research](research/README.md).
+Status: implemented, 2026-09-23; extended for 0.2.0 on 2026-09-28 (§16). See §15 for where the code differs from this sketch. Inputs: [research](research/README.md).
 
 ## 1. Goals
 
@@ -165,6 +165,10 @@ public struct BookmarkService: Sendable {
     public func resolve(_ data: BookmarkData, kind: BookmarkKind? = nil,
                         policy: ResolutionPolicy = .default) async throws(BookmarkError) -> ResolvedBookmark
     public func availability(of data: BookmarkData, kind: BookmarkKind? = nil) async -> Availability
+
+    // One use of a grant's access, without a bookmark (0.2.0)
+    public func beginAccess(to grant: Grant) throws(BookmarkError) -> AccessLease
+    public func withAccess<T>(to grant: Grant, _ body: (URL) async throws -> T) async throws -> T
 }
 
 public final class ResolvedBookmark: Sendable {
@@ -258,6 +262,16 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
 
     // A snapshot, then every change carrying the record as it is after the change.
     public func updates(bufferingPolicy: …= .unbounded) async throws -> AsyncStream<StoreUpdate<Key, Metadata>>
+
+    // 0.2.0 (§16)
+    public nonisolated var snapshot: StoreSnapshot<Key, Metadata> { get }          // synchronous
+    public nonisolated func evictions(bufferingPolicy: …) -> AsyncStream<StoreEviction<Key, Metadata>>
+    public func add(pathOnly url: URL, key: Key, metadata: Metadata) async throws -> BookmarkRecord<Key, Metadata>
+    public func updateLastKnownPath(_ key: Key, to url: URL) async throws -> BookmarkRecord<Key, Metadata>
+    public func markUsed(_ key: Key) async throws
+    public func setPinned(_ isPinned: Bool, for key: Key) async throws
+    public func forget(where predicate: @Sendable (BookmarkRecord<Key, Metadata>) -> Bool) async throws -> [Key]
+    public func refreshStatuses(includingAvailable: Bool = false) async throws -> [Key]
 }
 
 public struct BookmarkRecord<Key, Metadata>: Sendable {   // Codable when Key and Metadata are
@@ -269,7 +283,12 @@ public struct BookmarkRecord<Key, Metadata>: Sendable {   // Codable when Key an
     public var status: RecordStatus           // .ok, .unavailable(BookmarkFailure, since: Date)
     public var createdAt: Date
     public var refreshedAt: Date?
+    public var lastUsedAt: Date?              // add, re-grant, markUsed, leases with recordsLastUse
+    public var isPinned: Bool                 // eviction keeps it while its item isn't gone
     public var metadata: Metadata
+    public var hasBookmark: Bool { get }      // false for a path-only record (empty data)
+    public var isInTrash: Bool { get }
+    public var isGone: Bool { get }           // .missing, .corrupt or in a Trash
 }
 ```
 
@@ -280,7 +299,7 @@ Store behaviour:
 - **Failure policy per store** (`StorePolicy.failureHandling`): `.keep` (default), or drop for specific failures. A store of locations the app can't work without can drop a record that can never come back (`.missing`, `.corrupt`), while a recents list keeps everything. `.corrupt` means bytes that record nothing, and a bookmark that has lost its scope is `.needsRegrant` and kept.
 - **Unresolved records are first-class.** They're in `records()` with a status and `lastKnownPath`, and every write includes them (R5).
 - **Duplicates by file identity**, not case-insensitive path.
-- **Optional ordering and limit** (`StorePolicy.limit`) for recents lists.
+- **Optional ordering and limit** (`StorePolicy.limit`) for recents lists. `StorePolicy.eviction` decides what goes beyond the limit (§16).
 - **Validators** run on `add` and `regrant` (§9.3): the policy's for every key, and `validatorsForKey` for checks that depend on the key.
 - **Writes are serialised** and the in-memory state only changes after persistence succeeds. The actor is reentrant at the persistence `await`, so an async lock keeps writes in order; reads see the last saved state and never wait for a save.
 - **Writes merge with what is stored.** Each change is applied to the records as the persistence holds them at that moment, inside `BookmarkPersistence.update(_:)`, so a host app and its extensions can share one file without overwriting each other. Changes another process saved reach subscribers with the next change, with `reload()`, or continuously through `reload(on: persistence.changes())`.
@@ -336,10 +355,14 @@ A grant is an obligation like a lease: adopting or relinquishing it is idempoten
 
 Save panels return URLs for files that don't exist yet; bookmark creation fails with 260 until the file is written. `Grant.savePanel` bookmarks the parent directory's scope, or defers creation until `commitWrite()`.
 
+A grant can also be used once without a bookmark: `BookmarkService.beginAccess(to:)` gives a lease whose handle takes over the system's start (or starts access when the origin doesn't), and `withAccess(to:_:)` wraps it. The grant is used up like an adopted one, so a picker result is never both leased this way and adopted.
+
 ## 9. Scenarios
 
 ### 9.1 Document-scoped bookmarks (macOS)
-`service.documents(anchoredOn:)` returns a `DocumentBookmarks` that creates and resolves `.documentScoped` bookmarks to files referenced from a document, and is the only API that takes a document anchor. It checks the rules it can up front (targets must be files; the anchor must be a file) and fails with `.unsupported` or `.refused`. A missing document-scope entitlement surfaces as `.denied`, the system's 256. The docs note that tools stripping extended attributes break these.
+`service.documents(anchoredOn:)` returns a `DocumentBookmarks` that creates and resolves `.documentScoped` bookmarks to files referenced from a document, and is the only API that takes a document anchor. It checks the rules it can up front (targets must be files; the anchor must be a file) and fails with `.unsupported` or `.refused`. A missing document-scope entitlement surfaces as `.denied`, the system's 256, and so do targets in the app's container or temporary folder.
+
+The key of these bookmarks lives in the anchor's `com.apple.security.private.scoped-bookmark-key` extended attribute, which a sandboxed app can't read or write. The integration host verified on macOS 27 (research §3) that a plain atomic write of the anchor loses it, so every bookmark in the document fails with 256 (`.denied`), and bookmarks made afterwards get a new key while the old ones fail with 259 (`.needsRegrant`). In-place writes, moves, copies, `FileManager.replaceItemAt` and `NSDocument`'s safe save keep it. Since the key can't be carried over by hand, the library can't repair a document that lost it; it prevents the loss instead: `DocumentBookmarks.replaceDocument(_:)` replaces the anchor atomically through the engine's `ItemReplacing.replaceItem(at:writing:)`, which writes to a temporary file on the anchor's volume and swaps it in with `replaceItemAt`, keeping the attributes. It runs to completion even when the caller is cancelled, like persistence writes. An app that has already lost the key re-creates its bookmarks from leases it still holds, or asks the user again.
 
 ### 9.2 Handoff to helpers and extensions
 - `service.handoff.makeToken(for lease: AccessLease) -> BookmarkData` creates an `.implicit` bookmark for sending to an XPC service or login item. It's a bearer token valid until reboot, so it's never persisted (R9).
@@ -369,19 +392,32 @@ Validators return typed refusals; the app supplies the copy.
 ## 10. UI helpers (`BookmarksUI`)
 
 - `OpenPanelPicker.choose(_:attachedTo:) async -> [Grant]` on macOS and `DocumentPicker.choose(_:from:) async -> [Grant]` on iOS, configured by `PickerConfiguration`.
-- `.bookmarkImporter(isPresented:configuration:onGrants:onFailure:)`: SwiftUI `fileImporter` wrapper that produces `Grant`s with the right origin.
+- `.bookmarkImporter(isPresented:configuration:onGrants:onFailure:onCancel:)`: SwiftUI `fileImporter` wrapper that produces `Grant`s with the right origin, and applies the configuration through the `fileDialog…` modifiers.
 - `.bookmarkDropDestination(onDrop:)`: drop wrapper with origin `.swiftUIDrop`.
-- `BookmarkStore.regrantWithOpenPanel(_:message:prompt:attachedTo:)`: opens the panel at the record's last known location, with a message the app supplies, and calls `store.regrant`. `StorePolicy.requiresSameItemOnRegrant` checks that the user picked the same file identity.
+- Re-grant: `BookmarkStore.regrantWithOpenPanel(_:message:prompt:attachedTo:)` (macOS), `regrantWithDocumentPicker(_:from:fileTypes:)` (iOS, visionOS, Mac Catalyst) and `.bookmarkRegrant(of:in:message:prompt:fileTypes:onCompletion:)` (SwiftUI, every platform) open a picker at the record's last known location and call `store.regrant`. All three return the record, `nil` for a cancel, or `BookmarkStoreError`, and share `regrantConfiguration(for:…)` and `regrant(_:withFirstOf:)`. `StorePolicy.requiresSameItemOnRegrant` checks that the user picked the same file identity.
+
+What each picker honours:
+
+| `PickerConfiguration` | `OpenPanelPicker` (macOS) | `DocumentPicker` (iOS, visionOS, Catalyst) | `bookmarkImporter` on macOS | `bookmarkImporter` elsewhere |
+|---|---|---|---|---|
+| `directoryURL` | ✓ | ✓ | ✓ | ✓ |
+| content types, multiple selection | ✓ | ✓ | ✓ | ✓ |
+| `message` | ✓ | — | ✓ | — (no message area) |
+| `prompt` | ✓ | — | ✓ (confirmation label) | — |
+| `showsHiddenFiles` | ✓ | — | ✓ (browser options) | — |
+| `canCreateFolders` | ✓ | — | — | — |
+
+The importer passes every option to SwiftUI on every platform; the dashes are where the system picker has nothing to show it with.
 
 ## 11. Testing
 
 `BookmarksTesting`:
 
-- `FakeBookmarkEngine`: bookmark bytes are the path; scriptable stale, failure per path, hangs with gates, sandboxed/unsandboxed mode. It only accepts `start` on URLs it issued from `resolve` or intake, and records every start and stop.
+- `FakeBookmarkEngine`: bookmark bytes are the path; scriptable stale, failure per path (cleared with `clearScriptedFailures(of:)`), hangs with gates, sandboxed/unsandboxed mode. It only accepts `start` on URLs it issued from `resolve` or intake, and records every start and stop. It defaults to a sandboxed app on the host's platform, and reads option bits the same way on every host, so an explicit environment simulates another platform faithfully. It models what the host found about the sandbox: anchor keys and what loses them, and 259 for deleted items behind scoped bookmarks.
 - `engine.isBalanced` and `engine.balanceReport` show whether every start has one stop; the report describes outstanding starts, unbalanced stops and starts on unissued URLs, so `#expect(engine.isBalanced, "\(engine.balanceReport)")` fails readably. The package doesn't import `Testing`.
 - `engine.grant(_:origin:)` stands in for pickers in UI-flow tests. `InMemoryPersistence` backs previews; `ScriptedPersistence` fails loads and saves on request and can replace its records as another process would.
 
-`IntegrationHost` is a sandboxed macOS app (and an iOS app) with a scenario runner. It exists to answer, on real signed builds, the questions the research couldn't verify:
+`IntegrationHost` is a sandboxed macOS app with probes and a hosted test bundle. The tests run inside the sandbox with `xcodebuild test`, on files in the user's Downloads folder, which the host reaches through its `downloads.read-write` entitlement. It exists to answer, on real signed builds, the questions the research couldn't verify:
 
 1. Does `start` on an already-started panel/drop URL return `true` (refcount) or `false`? Is a `.dropDestination(for: URL.self)` URL started? **Answered for drops and Finder opens on macOS** (research §5): both are started; another `start` returns `false` on a drop and `true` on a Finder open; each owes one `stop`.
 2. Is the refcount per URL object or per path? Does a URL rebuilt with `URL(filePath:)` lose the scope?
@@ -390,6 +426,8 @@ Validators return typed refusals; the app supplies the copy.
 5. Does an atomic save next to a file-scoped bookmark need the parent's scope?
 6. iOS: does an app extension resolve a regular bookmark created by its host app through an app group?
 7. Does the system start access for a folder an `NSItemProvider` hands over in place (`.onDrop` with `loadInPlaceFileRepresentation`)? No `Grant.Origin` covers it yet.
+8. Does a document-scoped bookmark survive an atomic save of its anchor? **Answered** (§9.1, research §3): not a plain atomic write; `replaceItemAt` and `NSDocument` keep it.
+9. Which failure does a deleted item give inside the sandbox? **Answered** (research §6): 259 for app- and document-scoped bookmarks, 4 for reference bookmarks.
 
 The answers feed back into `Grant` intake and the fake engine, so unit tests stay accurate.
 
@@ -414,9 +452,9 @@ The answers feed back into `Grant` intake and the fake engine, so unit tests sta
 
 Where the code differs from the sketches above:
 
-- **Engine:** the seam is three protocols. `BookmarkEngine` creates and resolves bytes and starts and stops scopes, taking Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options. `ItemInspecting` answers `itemInfo(at:)`, `fileIdentity(of:)`, `isVolumeMounted(atPath:)` and `namesAreCaseSensitive(at:)`, and `AliasFileAccessing` reads and writes alias files. `BookmarkService` takes their composition, `FileSystemEngine`; the registry and scopes need only `BookmarkEngine`, and validation only `ItemInspecting`. Engines must not call back into the library, because starts and stops run under its locks.
+- **Engine:** the seam is four protocols. `BookmarkEngine` creates and resolves bytes and starts and stops scopes, taking Foundation's option sets rather than kinds and policies; `BookmarkKind` maps itself to options, spelling the security-scope options by their bits so the mapping is the same on every platform (scoped kinds never reach the system on iOS, because `unsupportedReason` rejects them first). `ItemInspecting` answers `itemInfo(at:)`, `fileIdentity(of:)`, `isVolumeMounted(atPath:)`, `itemExists(atPath:)` and `namesAreCaseSensitive(at:)`, `AliasFileAccessing` reads and writes alias files, and `ItemReplacing` replaces an item keeping its extended attributes. `itemExists` and `replaceItem` have default implementations, so engines written against 0.1 still conform. `BookmarkService` takes their composition, `FileSystemEngine`; the registry and scopes need only `BookmarkEngine`, and validation only `ItemInspecting`. Engines must not call back into the library, because starts and stops run under its locks.
 - **Default kind:** `BookmarkKind.persistentDefault(for:)` takes the environment; the static property uses the current process.
-- **Failures:** `BookmarkFailure` also has `.refused(GrantRefusal)` for validator refusals and `.cancelled` for callers that stop waiting.
+- **Failures:** `BookmarkFailure` also has `.refused(GrantRefusal)` for validator refusals and `.cancelled` for callers that stop waiting. A 259 whose bookmark recorded a path where `itemExists` finds nothing is `.missing` (or `.volumeUnavailable`), because inside the sandbox a deleted item behind a scoped bookmark fails with 259; only a definite "no such file" counts, so a path the sandbox won't let the library check stays `.needsRegrant`.
 - **Validators** run inside `BookmarkService.adopt` and `create`, while access to the item is held, through `validators:` and `context:` parameters. They inspect items through `BookmarkEngine.itemInfo(at:)`. `.notTooBroad` refuses every top-level folder, other users' homes and second-level system folders as well as the home folder and its ancestors.
 - **Grant origins:** `Grant.isStartedBySystem(on:)` takes the platform, so tests can check every platform on one machine.
 - **Store:** an actor whose bookkeeping lives in an internal `RecordTable` value type. Errors are `BookmarkStoreError<Key>`. Resolution uses `StorePolicy.mounting` and `StorePolicy.allowsUI`, not a per-call argument; the store never lets resolution start implicit access, so the policy has no field for it. A lease whose record keeps changing during resolution fails with `BookmarkStoreError.changedDuringAccess` rather than `.notFound`. `lease(covering:)` first reuses an active scope anywhere in the process that grants the store's access, then falls back to a shallower stored folder when the deepest one doesn't resolve. The registry is internal; the store exposes `activeLease(for:)`, `activeKeys` and `endAllAccess()`.
@@ -425,5 +463,16 @@ Where the code differs from the sketches above:
 - **Save panels:** there is no `commitWrite()`. Callers write the file first, then create or adopt the bookmark.
 - **Unsandboxed builds** default to `.reference` bookmarks.
 - **System engine:** resource values are read without `URL`'s cache, because cached values hid identity changes after atomic saves.
-- **UI:** `OpenPanelPicker`, `DocumentPicker`, `RegrantConfiguration`, `GrantMapping`, `bookmarkImporter` and `bookmarkDropDestination`. The document picker resumes with no grants when it's dismissed without a delegate callback.
-- **Integration host:** `IntegrationHost/` is an XcodeGen project; see its README for the probes.
+- **UI:** `OpenPanelPicker`, `DocumentPicker`, `RegrantConfiguration`, `GrantMapping`, `bookmarkImporter`, `bookmarkRegrant` and `bookmarkDropDestination`. The document picker resumes with no grants when it's dismissed without a delegate callback. The SwiftUI re-grant keeps its state in an `@Observable` `RegrantSession`, so everything but handing the importer's callbacks over is tested without presenting UI.
+- **Integration host:** `IntegrationHost/` is an XcodeGen project with interactive probes and a hosted Swift Testing bundle that runs in the sandbox; see its README.
+
+## 16. Document histories (0.2.0)
+
+An app's "document identity" store — a stable key per document for its own data, the last path, a bookmark when it can make one, last use, a keep flag, a limit with a gone-first eviction and a synchronous view for its UI — is a `BookmarkStore` with a policy. The decisions:
+
+- **Path-only records are records with empty bytes.** `BookmarkRecord.data` stays non-optional, so code that reads it keeps compiling; `hasBookmark` tells them apart, and real bookmark bytes are never empty. They are written without `data`, so a version that predates them can't decode them and keeps them verbatim (§7.1) instead of resolving empty bytes into `.corrupt`. A path-only record has the store's kind; leasing it or refreshing statuses creates a bookmark from the path as an `.alreadyAccessible` grant (which succeeds only while the app reaches the item) and commits it only if the record wasn't changed meanwhile, like a refresh. A missing item on an unmounted `/Volumes` disk is `.volumeUnavailable`, not `.missing`, so eviction doesn't take it for gone.
+- **Eviction is a policy value, not a callback into the app.** `EvictionPolicy` protects some records and orders the rest, from an `EvictionCandidate` that describes a record without its generic key; `.storeOrder` (the old behaviour, still the default), `.leastRecentlyUsed` and `.goneFirst` are built in. It runs inside the store's save, so it can't do I/O and uses what the store knows: statuses from the last resolution (`refreshStatuses(includingAvailable:)` refreshes them all) and the last path for the Trash. The keep flag is stored (`isPinned`) rather than asked of the app, so the policy never calls app code under the store's lock and the flag survives relaunches; every built-in policy keeps a pinned record while its item isn't gone.
+- **Removals the app didn't ask for are reported.** `evictions()` is `nonisolated`, so an app subscribes right after creating the store, before any add, and it reports limit evictions and records `FailureHandling` drops, with the record and the reason. `forget(_:)` isn't reported: the app knows.
+- **Last use is opt-in for leases.** Adds, re-grants and `markUsed(_:)` set `lastUsedAt` as part of a write they make anyway; a lease sets it only with `StorePolicy.recordsLastUse`, because it costs a save per lease.
+- **The synchronous read is a published snapshot.** `snapshot` is a `Mutex`-guarded `StoreSnapshot`, replaced after each load and saved change and before subscribers hear of the change. The actor stays the only writer; readers never block on a save.
+- **`lastKnownPath` is the app's to set too.** `updateLastKnownPath(_:to:)` is a hint for a bookmarked record until the bookmark next resolves, which always writes the resolved path; for a path-only record it's where the store looks, so its identity is read again, its status forgotten and in-flight upgrades of the old path discarded.
