@@ -38,8 +38,37 @@ targets:
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.files.bookmarks.app-scope: true
         com.apple.security.files.bookmarks.document-scope: true
+        com.apple.security.files.downloads.read-write: true
     info:
       path: Config/Info.plist
       properties:
         CFBundleDisplayName: Bookmarks Integration Host
         LSApplicationCategoryType: public.app-category.developer-tools
+
+  BookmarksIntegrationHostTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+    dependencies:
+      - target: BookmarksIntegrationHost
+      - package: Bookmarks
+        product: Bookmarks
+    settings:
+      base:
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/BookmarksIntegrationHost.app/Contents/MacOS/BookmarksIntegrationHost
+        BUNDLE_LOADER: $(TEST_HOST)
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  BookmarksIntegrationHost:
+    build:
+      targets:
+        BookmarksIntegrationHost: all
+        BookmarksIntegrationHostTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - BookmarksIntegrationHostTests

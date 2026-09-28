@@ -35,7 +35,8 @@ enum FakeFlavor: Codable, Equatable, Sendable {
         if options.contains(.fakeSecurityScope), !isScoped {
             throw CocoaError.error(.fileReadCorruptFile)
         }
-        if case .documentScoped = self, payload.document != document {
+        // With a key, the anchor's key decides, so a moved anchor still resolves.
+        if case .documentScoped = self, document == nil || (payload.documentKey == nil && payload.document != document) {
             throw CocoaError.error(.fileReadCorruptFile)
         }
     }
@@ -59,5 +60,7 @@ struct FakePayload: Codable, Sendable {
     let isDirectory: Bool
     let flavor: FakeFlavor
     let document: String?
+    /// The key of the document a document-scoped bookmark is anchored on.
+    var documentKey: Int?
     let serial: Int
 }

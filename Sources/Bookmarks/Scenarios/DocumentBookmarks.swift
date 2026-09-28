@@ -6,8 +6,19 @@ public import Foundation
 /// stored inside a document the user shares. The system requires both the document and the
 /// targets to be files, and the app needs the
 /// `com.apple.security.files.bookmarks.document-scope` entitlement; without it, creation
-/// fails with ``BookmarkFailure/denied``. Tools that strip extended attributes from the
-/// document break its bookmarks. macOS and Mac Catalyst only.
+/// fails with ``BookmarkFailure/denied``. Targets in the app's container or temporary folder
+/// are refused with ``BookmarkFailure/denied`` too. macOS and Mac Catalyst only.
+///
+/// The bookmarks depend on a key the system keeps in an extended attribute of the document,
+/// which the app can't read or copy. Anything that writes the document as a new file without
+/// its extended attributes loses the key, and every bookmark in it then fails with
+/// ``BookmarkFailure/denied``: a plain atomic write such as `Data.write(to:options: .atomic)`
+/// or `String.write(to:atomically: true)`, and tools that strip extended attributes.
+/// Bookmarks made after that get a new key, and the older ones fail with
+/// ``BookmarkFailure/needsRegrant``. Writing in place, moving or copying the document, and
+/// `FileManager.replaceItemAt(_:withItemAt:)`, which `NSDocument`'s safe saving uses, keep
+/// the key. Save the document with ``replaceDocument(_:)`` to replace it atomically and keep
+/// its bookmarks working.
 public struct DocumentBookmarks: Sendable {
     /// The document that anchors the bookmarks.
     public let document: URL
@@ -60,6 +71,49 @@ public struct DocumentBookmarks: Sendable {
         _ body: (URL) async throws -> T
     ) async throws -> T {
         try await service.withAccess(to: data, kind: kind, document: document, policy: .default, body)
+    }
+
+    /// Replaces the document atomically with a file that `write` writes, keeping the key its
+    /// bookmarks depend on.
+    ///
+    /// `write` writes the new contents to the URL it's given, a temporary file on the
+    /// document's volume, which then replaces the document as `NSDocument`'s safe saving does.
+    /// The document's other extended attributes are kept too. The app needs write access to
+    /// the document. `write` runs on the service's executor and the replacement runs to
+    /// completion even when the caller is cancelled, so the document is never left half
+    /// saved. Replacing works on every platform, though only macOS and Mac Catalyst have
+    /// document-scoped bookmarks.
+    ///
+    /// ```swift
+    /// try await documents.replaceDocument { url in
+    ///     try encoder.encode(project).write(to: url)
+    /// }
+    /// ```
+    ///
+    /// Fails with the classified error `write` or the replacement throws, such as
+    /// ``BookmarkFailure/missing`` when `write` wrote nothing.
+    public func replaceDocument(_ write: @escaping @Sendable (URL) throws -> Void) async throws(BookmarkError) {
+        let engine = service.engine
+        let classifier = service.classifier
+        let document = document
+        let result = await service.executor.perform { () -> Result<Void, BookmarkError> in
+            do {
+                try engine.replaceItem(at: document, writing: write)
+                return .success(())
+            } catch {
+                let failure = classifier.classify(error, recorded: nil)
+                return .failure(BookmarkError(failure, lastKnownPath: document.path(percentEncoded: false), underlying: error))
+            }
+        }
+        try result.get()
+    }
+
+    /// Replaces the document atomically with `contents`, keeping the key its bookmarks depend
+    /// on. See ``replaceDocument(_:)``.
+    public func replaceDocument(with contents: Data) async throws(BookmarkError) {
+        try await replaceDocument { url in
+            try contents.write(to: url)
+        }
     }
 
     private func checkDocument() async throws(BookmarkError) {

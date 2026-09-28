@@ -94,14 +94,30 @@ struct DocumentBookmarksTests {
         #expect(error?.failure == .missing)
     }
 
+    /// As the integration host found on macOS 27: an anchor without a key refuses (256), one
+    /// with its own key doesn't match (259).
     @Test func resolvingAgainstAnotherDocumentFails() async throws {
         let data = try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
         engine.addItem(at: "/Users/me/Other.pages", isDirectory: false)
+        engine.addItem(at: "/Users/me/Images/photo.png", isDirectory: false)
         let other = Fixtures.service(engine).documents(anchoredOn: URL(filePath: "/Users/me/Other.pages"))
 
-        let error = await #expect(throws: BookmarkError.self) { try await other.resolve(data) }
+        let withoutKey = await #expect(throws: BookmarkError.self) { try await other.resolve(data) }
+        _ = try await other.create(for: engine.grant("/Users/me/Images/photo.png", origin: .openPanel))
+        let withKey = await #expect(throws: BookmarkError.self) { try await other.resolve(data) }
 
-        #expect(error?.failure == .needsRegrant)
+        #expect(withoutKey?.failure == .denied)
+        #expect(withKey?.failure == .needsRegrant)
+    }
+
+    @Test func aDeletedTargetIsMissing() async throws {
+        let data = try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
+        engine.removeItem(at: "/Users/me/Images/chart.png")
+
+        let error = await #expect(throws: BookmarkError.self) { try await documents.resolve(data) }
+
+        #expect(error?.failure == .missing)
+        #expect((error?.underlying as? NSError)?.code == NSFileReadCorruptFileError)
     }
 
     @Test func unsupportedOnIOS() async {

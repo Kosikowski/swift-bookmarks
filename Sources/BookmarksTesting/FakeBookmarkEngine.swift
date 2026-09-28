@@ -6,7 +6,10 @@ import Synchronization
 /// matter for bookmarks.
 ///
 /// Items have identities that follow moves; atomic replaces change the identity at a path;
-/// volumes can be unmounted. In a sandboxed environment, creating a bookmark requires
+/// volumes can be unmounted. A document that anchors document-scoped bookmarks holds their
+/// key as the system does, in an extended attribute that a plain atomic replace loses. In a
+/// sandboxed environment, a security-scoped bookmark to a deleted item fails with
+/// `NSFileReadCorruptFileError` (259), as it does in the App Sandbox. In a sandboxed environment, creating a bookmark requires
 /// access to the item, as the real system does, and every start and stop is counted per path
 /// so tests can assert that access is balanced.
 public final class FakeBookmarkEngine: FileSystemEngine {
@@ -55,8 +58,23 @@ public final class FakeBookmarkEngine: FileSystemEngine {
     }
 
     /// Replaces the item at `path` with a new one, as an atomic save does. The identity changes.
-    public func replaceItem(at path: String) {
-        state.withLock { $0.replaceItem(at: path) }
+    ///
+    /// - Parameter keepingExtendedAttributes: Whether the new item keeps the old one's
+    ///   extended attributes, as `FileManager.replaceItemAt(_:withItemAt:)` and
+    ///   `NSDocument`'s safe saving do. A plain atomic write, `Data.write(to:options: .atomic)`,
+    ///   doesn't, and loses the key of document-scoped bookmarks anchored on the item.
+    public func replaceItem(at path: String, keepingExtendedAttributes: Bool = false) {
+        state.withLock { $0.replaceItem(at: path, keepingExtendedAttributes: keepingExtendedAttributes) }
+    }
+
+    /// Removes the extended attributes of the item at `path`, as some copy, archive and sync
+    /// tools do, losing the key of document-scoped bookmarks anchored on it.
+    public func stripExtendedAttributes(at path: String) {
+        state.withLock { state in
+            if let item = state.items[path] {
+                state.documentKeys[item.id] = nil
+            }
+        }
     }
 
     /// Mounts a volume at `path`, such as `/Volumes/External`.
@@ -126,6 +144,12 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         state.withLock { $0.resolutionFailures[path] = ScriptedFailure(error: error, times: times) }
     }
 
+    /// Makes replacing the item at `path` through ``replaceItem(at:writing:)`` fail with
+    /// `error`, `times` times or, when `times` is `nil`, until cleared.
+    public func failReplacement(of path: String, with error: NSError, times: Int? = nil) {
+        state.withLock { $0.replacementFailures[path] = ScriptedFailure(error: error, times: times) }
+    }
+
     /// Makes creating bookmarks to `path` fail with `error`, `times` times or, when `times` is
     /// `nil`, until cleared.
     ///
@@ -135,8 +159,8 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         state.withLock { $0.creationFailures[path] = ScriptedFailure(error: error, times: times) }
     }
 
-    /// Removes scripted resolution and creation failures and refused access, for `path` or,
-    /// when `path` is `nil`, for every path.
+    /// Removes scripted resolution, creation and replacement failures and refused access, for
+    /// `path` or, when `path` is `nil`, for every path.
     ///
     /// Forced staleness, holds and the file system are left as they are.
     public func clearScriptedFailures(of path: String? = nil) {
@@ -144,11 +168,13 @@ public final class FakeBookmarkEngine: FileSystemEngine {
             guard let path else {
                 state.resolutionFailures.removeAll()
                 state.creationFailures.removeAll()
+                state.replacementFailures.removeAll()
                 state.refused.removeAll()
                 return
             }
             state.resolutionFailures[path] = nil
             state.creationFailures[path] = nil
+            state.replacementFailures[path] = nil
             state.refused.remove(path)
         }
     }
@@ -268,6 +294,9 @@ public final class FakeBookmarkEngine: FileSystemEngine {
                 guard !state.isDirectory(path) else {
                     throw CocoaError.error(.fileReadUnknown)
                 }
+                guard state.item(at: document.fakePath) != nil else {
+                    throw CocoaError.error(.fileReadNoSuchFile)
+                }
             }
             guard let item = state.item(at: path) else {
                 throw CocoaError.error(.fileReadNoSuchFile)
@@ -276,12 +305,18 @@ public final class FakeBookmarkEngine: FileSystemEngine {
                 throw CocoaError.error(.fileReadUnknown)
             }
             state.serial += 1
+            let documentKey: Int? = if case .documentScoped = flavor, let document {
+                state.documentKey(at: document.fakePath)
+            } else {
+                nil
+            }
             let payload = FakePayload(
                 itemID: item.id,
                 path: path,
                 isDirectory: item.isDirectory,
                 flavor: flavor,
                 document: document?.fakePath,
+                documentKey: documentKey,
                 serial: state.serial
             )
             return BookmarkData(try JSONEncoder().encode(payload))
@@ -312,6 +347,19 @@ public final class FakeBookmarkEngine: FileSystemEngine {
                 throw error
             }
             try payload.flavor.checkResolution(options: options, document: document?.fakePath, payload: payload)
+            if let expected = payload.documentKey, let document {
+                // As the system does: 256 when the document lost its key, 259 when it has
+                // another one.
+                guard let anchor = state.item(at: document.fakePath) else {
+                    throw CocoaError.error(.fileNoSuchFile)
+                }
+                guard let key = state.documentKeys[anchor.id] else {
+                    throw CocoaError.error(.fileReadUnknown)
+                }
+                guard key == expected else {
+                    throw CocoaError.error(.fileReadCorruptFile)
+                }
+            }
 
             let volume = FakeFileSystem.volume(of: payload.path)
             if !state.mountedVolumes.contains(volume) {
@@ -329,6 +377,10 @@ public final class FakeBookmarkEngine: FileSystemEngine {
             } else if state.item(at: payload.path) != nil {
                 path = payload.path
                 isStale = true
+            } else if environment.isSandboxed, payload.flavor.isScoped {
+                // Inside the App Sandbox, the system reports a deleted item behind a
+                // security-scoped bookmark as it reports a scope key that doesn't match.
+                throw CocoaError.error(.fileReadCorruptFile)
             } else {
                 throw CocoaError.error(.fileNoSuchFile)
             }
@@ -399,6 +451,10 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         }
     }
 
+    public func itemExists(atPath path: String) -> Bool? {
+        state.withLock { $0.item(at: path.trimmingTrailingSlashes) != nil }
+    }
+
     public func namesAreCaseSensitive(at url: URL) -> Bool {
         let volume = FakeFileSystem.volume(of: url.fakePath)
         return state.withLock { !$0.caseInsensitiveVolumes.contains(volume) }
@@ -433,6 +489,33 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         }
     }
 
+    /// Calls `write` with a real temporary file, then replaces the simulated item at `url`
+    /// keeping its extended attributes, as the system's implementation does.
+    ///
+    /// Fails with `NSFileNoSuchFileError` when there is no item at `url` or `write` wrote
+    /// nothing, and with what a failure scripted with ``failReplacement(of:with:)`` says.
+    public func replaceItem(at url: URL, writing write: (URL) throws -> Void) throws {
+        let path = url.fakePath
+        let folder = FileManager.default.temporaryDirectory.appending(path: "FakeBookmarkEngine-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let replacement = folder.appending(path: url.lastPathComponent)
+        try write(replacement)
+        guard FileManager.default.fileExists(atPath: replacement.path(percentEncoded: false)) else {
+            throw CocoaError.error(.fileNoSuchFile)
+        }
+        try state.withLock { state in
+            state.calls.replacements += 1
+            if let error = FakeFileSystem.consumeFailure(&state.replacementFailures, for: path) {
+                throw error
+            }
+            guard state.item(at: path) != nil else {
+                throw CocoaError.error(.fileNoSuchFile)
+            }
+            state.replaceItem(at: path, keepingExtendedAttributes: true)
+        }
+    }
+
     public func aliasFileData(at url: URL) throws -> BookmarkData {
         let path = url.fakePath
         return try state.withLock { state in
@@ -451,6 +534,7 @@ extension FakeBookmarkEngine {
         public var resolutions = 0
         public var starts = 0
         public var stops = 0
+        public var replacements = 0
     }
 
     /// A recorded creation request.

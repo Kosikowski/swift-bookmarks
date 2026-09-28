@@ -184,7 +184,10 @@ extension BookmarkService {
 
     var classifier: FailureClassifier {
         let engine = engine
-        return FailureClassifier { engine.isVolumeMounted(atPath: $0) }
+        return FailureClassifier(
+            isVolumeMounted: { engine.isVolumeMounted(atPath: $0) },
+            itemExists: { engine.itemExists(atPath: $0) }
+        )
     }
 
     func create(

@@ -2,6 +2,13 @@ import Foundation
 
 struct FailureClassifier: Sendable {
     let isVolumeMounted: @Sendable (String) -> Bool
+    /// Whether an item exists at a path, `nil` when that can't be told.
+    let itemExists: @Sendable (String) -> Bool?
+
+    init(isVolumeMounted: @escaping @Sendable (String) -> Bool, itemExists: @escaping @Sendable (String) -> Bool? = { _ in nil }) {
+        self.isVolumeMounted = isVolumeMounted
+        self.itemExists = itemExists
+    }
 
     func classify(_ error: any Error, recorded: RecordedValues?) -> BookmarkFailure {
         let error = error as NSError
@@ -10,7 +17,14 @@ struct FailureClassifier: Sendable {
              (NSCocoaErrorDomain, NSFileReadNoSuchFileError):
             return missingOrUnmounted(recorded)
         case (NSCocoaErrorDomain, NSFileReadCorruptFileError):
-            return recorded == nil ? .corrupt : .needsRegrant
+            guard let recorded else { return .corrupt }
+            // Inside the App Sandbox, a security-scoped bookmark to an item that was deleted
+            // fails with this code too, not with NSFileNoSuchFileError. Nothing at the recorded
+            // path tells a deleted item from a scope key that doesn't match.
+            if let path = recorded.path, itemExists(path) == false {
+                return missingOrUnmounted(recorded)
+            }
+            return .needsRegrant
         case (NSCocoaErrorDomain, NSFileReadNoPermissionError),
              (NSCocoaErrorDomain, NSFileWriteNoPermissionError):
             return .denied

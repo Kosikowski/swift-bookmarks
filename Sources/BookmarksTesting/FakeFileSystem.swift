@@ -28,6 +28,10 @@ struct FakeFileSystem: Sendable {
     var volumesWithoutUUID: Set<String> = []
     var freelyAccessible: Set<String> = []
     var aliasFiles: [String: BookmarkData] = [:]
+    /// The key of document-scoped bookmarks anchored on an item, by item, as the system keeps
+    /// it in the item's extended attributes.
+    var documentKeys: [UInt64: Int] = [:]
+    var nextDocumentKey = 1
 
     var issued: Set<String> = []
     var outstanding: [String: Int] = [:]
@@ -37,6 +41,7 @@ struct FakeFileSystem: Sendable {
 
     var resolutionFailures: [String: ScriptedFailure] = [:]
     var creationFailures: [String: ScriptedFailure] = [:]
+    var replacementFailures: [String: ScriptedFailure] = [:]
     var forcedStale: [String: Int] = [:]
     var gates: [String: [FakeBookmarkEngine.Gate]] = [:]
     var creationGates: [String: [FakeBookmarkEngine.Gate]] = [:]
@@ -131,10 +136,25 @@ struct FakeFileSystem: Sendable {
         }
     }
 
-    mutating func replaceItem(at path: String) {
+    mutating func replaceItem(at path: String, keepingExtendedAttributes: Bool) {
         guard let existing = items[path] else { return }
         items[path] = FakeItem(id: nextItemID, isDirectory: existing.isDirectory)
+        if let key = documentKeys.removeValue(forKey: existing.id), keepingExtendedAttributes {
+            documentKeys[nextItemID] = key
+        }
         nextItemID += 1
+    }
+
+    /// The document key of the item at `path`, making one when it has none.
+    mutating func documentKey(at path: String) -> Int? {
+        guard let item = item(at: path) else { return nil }
+        if let key = documentKeys[item.id] {
+            return key
+        }
+        let key = nextDocumentKey
+        nextDocumentKey += 1
+        documentKeys[item.id] = key
+        return key
     }
 
     mutating func recordStart(_ path: String) {
