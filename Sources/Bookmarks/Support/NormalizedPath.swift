@@ -35,6 +35,12 @@ struct NormalizedPath: Equatable, Sendable, CustomStringConvertible {
         other.keys(caseSensitive: isCaseSensitive).starts(with: keys(caseSensitive: isCaseSensitive))
     }
 
+    /// Whether the path is inside a Trash: a `.Trash` folder, as in the home folder and iCloud
+    /// Drive, or a volume's `.Trashes`.
+    var isInTrash: Bool {
+        components.contains { $0 == ".Trash" || $0 == ".Trashes" }
+    }
+
     /// Whether both paths name the same location.
     func matches(_ other: NormalizedPath) -> Bool {
         other.keys(caseSensitive: isCaseSensitive) == keys(caseSensitive: isCaseSensitive)

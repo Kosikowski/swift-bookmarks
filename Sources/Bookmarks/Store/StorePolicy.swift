@@ -49,9 +49,15 @@ public struct StorePolicy: Sendable {
     public var duplicates: DuplicateHandling
     /// The order of ``BookmarkStore/records()``.
     public var ordering: RecordOrdering
-    /// The maximum number of records. Beyond it, the least recent records are removed: the
-    /// oldest in insertion order, the least recently used in most-recently-used order.
+    /// The maximum number of records. When an addition goes beyond it, ``eviction`` decides
+    /// which records are removed; by default the least recent: the oldest in insertion order,
+    /// the least recently used in most-recently-used order.
     public var limit: Int?
+    /// Which records go when an addition takes the store past ``limit``, and which never do.
+    public var eviction: EvictionPolicy
+    /// Whether leasing a record updates its ``BookmarkRecord/lastUsedAt``, which costs a
+    /// save per lease. Adding, re-granting and ``BookmarkStore/markUsed(_:)`` always do.
+    public var recordsLastUse: Bool
     /// Checks run on items before they're added or re-granted. Checks that depend on the key
     /// go in ``BookmarkStore/validatorsForKey``.
     public var validators: [any GrantValidator]
@@ -68,6 +74,8 @@ public struct StorePolicy: Sendable {
         duplicates: DuplicateHandling = .reject,
         ordering: RecordOrdering = .insertion,
         limit: Int? = nil,
+        eviction: EvictionPolicy = .storeOrder,
+        recordsLastUse: Bool = false,
         validators: [any GrantValidator] = [],
         mounting: ResolutionPolicy.Mounting = .never,
         allowsUI: Bool = false,
@@ -78,6 +86,8 @@ public struct StorePolicy: Sendable {
         self.duplicates = duplicates
         self.ordering = ordering
         self.limit = limit
+        self.eviction = eviction
+        self.recordsLastUse = recordsLastUse
         self.validators = validators
         self.mounting = mounting
         self.allowsUI = allowsUI

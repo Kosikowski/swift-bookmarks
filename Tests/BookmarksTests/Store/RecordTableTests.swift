@@ -46,13 +46,19 @@ struct RecordTableTests {
         let result: Result
         let changes: [String]
         let invalidated: Set<String>
+        let evictions: [String]
     }
 
     static func transaction<Result>(_ table: inout Table, _ body: (inout Table) -> Result) -> Transaction<Result> {
         let old = table
         let result = body(&table)
-        let (changes, invalidated) = table.takeChanges(since: old)
-        return Transaction(result: result, changes: changes.map(\.summary), invalidated: invalidated)
+        let changes = table.takeChanges(since: old)
+        return Transaction(
+            result: result,
+            changes: changes.changes.map(\.summary),
+            invalidated: changes.invalidated,
+            evictions: changes.evictions.map { "\($0.key) \($0.reason)" }
+        )
     }
 
     @Test func loadingKeepsTheFirstRecordForEachKey() {
@@ -76,7 +82,7 @@ struct RecordTableTests {
 
         let old = table
         _ = table.updateMetadata(of: "a") { $0.name = "renamed" }
-        let (changes, _) = table.takeChanges(since: old)
+        let changes = table.takeChanges(since: old).changes
 
         guard case .updated(let record)? = changes.first else {
             Issue.record("Expected an update, got \(changes)")
@@ -123,7 +129,9 @@ struct RecordTableTests {
 
             #expect(evicting.changes == ["removed a"])
             #expect(evicting.invalidated == ["a"])
+            #expect(evicting.evictions == ["a limit"])
             #expect(unlimited.changes.isEmpty)
+            #expect(unlimited.evictions.isEmpty)
             #expect(table.order == ["b", "c"])
         }
 
@@ -441,7 +449,7 @@ struct RecordTableTests {
 
             let old = table
             table.replaceAll(with: [changed])
-            let (changes, _) = table.takeChanges(since: old)
+            let changes = table.takeChanges(since: old).changes
 
             #expect(changes.map(\.summary) == ["updated a"])
         }
