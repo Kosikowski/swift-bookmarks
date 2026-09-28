@@ -135,14 +135,16 @@ extension BookmarkKind {
         try container.encode(storedName)
     }
 
+    /// The options for creating a bookmark of this kind.
+    ///
+    /// They are the same on every platform the library is built for, so an engine that
+    /// simulates macOS on an iOS host, as the fake one in tests does, gets the options macOS
+    /// would. Security-scoped kinds never reach the system on iOS and visionOS, because
+    /// ``unsupportedReason(in:relativeTo:)`` rejects them first.
     var creationOptions: URL.BookmarkCreationOptions {
         switch self {
         case .appScoped(let mode), .documentScoped(let mode):
-            #if os(macOS) || targetEnvironment(macCatalyst)
-            mode == .readOnly ? [.withSecurityScope, .securityScopeAllowOnlyReadAccess] : [.withSecurityScope]
-            #else
-            []
-            #endif
+            mode == .readOnly ? [.securityScope, .securityScopeReadOnly] : [.securityScope]
         case .implicit:
             []
         case .reference:
@@ -162,9 +164,7 @@ extension BookmarkKind {
         }
         switch self {
         case .appScoped, .documentScoped:
-            #if os(macOS) || targetEnvironment(macCatalyst)
-            options.insert(.withSecurityScope)
-            #endif
+            options.insert(.securityScope)
         case .implicit:
             if !policy.startsImplicitAccess {
                 options.insert(.withoutImplicitStartAccessing)
@@ -174,4 +174,16 @@ extension BookmarkKind {
         }
         return options
     }
+}
+
+extension URL.BookmarkCreationOptions {
+    /// `.withSecurityScope`, which the SDK only names on macOS and Mac Catalyst.
+    static let securityScope = URL.BookmarkCreationOptions(rawValue: 1 << 11)
+    /// `.securityScopeAllowOnlyReadAccess`, which the SDK only names on macOS and Mac Catalyst.
+    static let securityScopeReadOnly = URL.BookmarkCreationOptions(rawValue: 1 << 12)
+}
+
+extension URL.BookmarkResolutionOptions {
+    /// `.withSecurityScope`, which the SDK only names on macOS and Mac Catalyst.
+    static let securityScope = URL.BookmarkResolutionOptions(rawValue: 1 << 10)
 }

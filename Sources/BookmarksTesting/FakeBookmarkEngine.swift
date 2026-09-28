@@ -15,8 +15,18 @@ public final class FakeBookmarkEngine: FileSystemEngine {
     private let state = Mutex(FakeFileSystem())
 
     /// Creates an engine with an empty file system and a mounted boot volume.
-    public init(environment: SandboxEnvironment = SandboxEnvironment(platform: .macOS, isSandboxed: true)) {
+    ///
+    /// - Parameter environment: The platform and sandbox the engine simulates. Defaults to a
+    ///   sandboxed app on the platform the tests run on, so the kinds, options and grant
+    ///   origins match the ones the app sees there. Pass an explicit environment to simulate
+    ///   another platform; the engine reads bookmark options the same way on every host.
+    public init(environment: SandboxEnvironment = FakeBookmarkEngine.hostEnvironment) {
         self.environment = environment
+    }
+
+    /// A sandboxed app on the platform the tests run on: macOS, Mac Catalyst, iOS or visionOS.
+    public static var hostEnvironment: SandboxEnvironment {
+        SandboxEnvironment(platform: SandboxEnvironment.current.platform, isSandboxed: true)
     }
 
     // MARK: - File system
@@ -107,14 +117,40 @@ public final class FakeBookmarkEngine: FileSystemEngine {
 
     // MARK: - Scripting
 
-    /// Makes resolutions of bookmarks to `path` fail with `error`, `times` times or forever.
+    /// Makes resolutions of bookmarks to `path` fail with `error`, `times` times or, when
+    /// `times` is `nil`, until cleared.
+    ///
+    /// Replaces any failure scripted earlier for `path`. A `times` of zero or less scripts no
+    /// failure, and so clears the earlier one.
     public func failResolution(of path: String, with error: NSError, times: Int? = nil) {
-        state.withLock { $0.resolutionFailures[path] = ScriptedFailure(error: error, remaining: times) }
+        state.withLock { $0.resolutionFailures[path] = ScriptedFailure(error: error, times: times) }
     }
 
-    /// Makes creating bookmarks to `path` fail with `error`, `times` times or forever.
+    /// Makes creating bookmarks to `path` fail with `error`, `times` times or, when `times` is
+    /// `nil`, until cleared.
+    ///
+    /// Replaces any failure scripted earlier for `path`. A `times` of zero or less scripts no
+    /// failure, and so clears the earlier one.
     public func failCreation(of path: String, with error: NSError, times: Int? = nil) {
-        state.withLock { $0.creationFailures[path] = ScriptedFailure(error: error, remaining: times) }
+        state.withLock { $0.creationFailures[path] = ScriptedFailure(error: error, times: times) }
+    }
+
+    /// Removes scripted resolution and creation failures and refused access, for `path` or,
+    /// when `path` is `nil`, for every path.
+    ///
+    /// Forced staleness, holds and the file system are left as they are.
+    public func clearScriptedFailures(of path: String? = nil) {
+        state.withLock { state in
+            guard let path else {
+                state.resolutionFailures.removeAll()
+                state.creationFailures.removeAll()
+                state.refused.removeAll()
+                return
+            }
+            state.resolutionFailures[path] = nil
+            state.creationFailures[path] = nil
+            state.refused.remove(path)
+        }
     }
 
     /// Makes the next resolution of a bookmark to `path` report stale bytes, `times` times.

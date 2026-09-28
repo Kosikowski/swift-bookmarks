@@ -9,7 +9,15 @@ struct FakeItem: Sendable {
 
 struct ScriptedFailure: Sendable {
     let error: NSError
+    /// How many more calls fail; `nil` for every call until cleared.
     var remaining: Int?
+
+    /// A failure for `times` calls, or `nil` when that's none.
+    init?(error: NSError, times: Int?) {
+        if let times, times <= 0 { return nil }
+        self.error = error
+        remaining = times
+    }
 }
 
 struct FakeFileSystem: Sendable {
@@ -137,7 +145,7 @@ struct FakeFileSystem: Sendable {
         guard var failure = failures[path] else { return nil }
         if let remaining = failure.remaining {
             failure.remaining = remaining - 1
-            failures[path] = remaining - 1 > 0 ? failure : nil
+            failures[path] = remaining > 1 ? failure : nil
         }
         return failure.error
     }

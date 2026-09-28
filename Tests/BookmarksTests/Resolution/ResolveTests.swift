@@ -29,7 +29,7 @@ struct ResolveTests {
         let options = try #require(engine.resolutionRequests.last?.options)
         #expect(options.contains(.withoutMounting))
         #expect(options.contains(.withoutUI))
-        #expect(options.contains(.withSecurityScope))
+        #expect(options.contains(.securityScope))
     }
 
     @Test func resolvingDoesNotStartAccess() async throws {

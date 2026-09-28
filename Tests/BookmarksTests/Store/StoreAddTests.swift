@@ -88,7 +88,7 @@ struct StoreAddTests {
         let record = try await store.add(engine.grant("/A", origin: .openPanel), key: "a", metadata: Tag(name: "a"))
 
         #expect(record.kind == .appScoped(.readOnly))
-        #expect(engine.creationRequests.last?.options == [.withSecurityScope, .securityScopeAllowOnlyReadAccess])
+        #expect(engine.creationRequests.last?.options == [.securityScope, .securityScopeReadOnly])
     }
 
     @Test func defaultsToTheEnvironmentsKind() {

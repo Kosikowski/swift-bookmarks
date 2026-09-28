@@ -5,9 +5,9 @@ import Testing
 
 @Suite("FakeBookmarkEngine")
 struct FakeBookmarkEngineTests {
-    let engine = FakeBookmarkEngine()
+    let engine = FakeBookmarkEngine(environment: .sandboxedMac)
 
-    func bookmark(_ path: String, options: URL.BookmarkCreationOptions = [.withSecurityScope], origin: Grant.Origin = .openPanel) throws -> BookmarkData {
+    func bookmark(_ path: String, options: URL.BookmarkCreationOptions = [.scope], origin: Grant.Origin = .openPanel) throws -> BookmarkData {
         engine.addItem(at: path)
         // The grant balances the system's start when it's released at the end of this call.
         let grant = engine.grant(path, origin: origin)
@@ -16,7 +16,7 @@ struct FakeBookmarkEngineTests {
 
     @Suite("File system")
     struct FileSystem {
-        let engine = FakeBookmarkEngine()
+        let engine = FakeBookmarkEngine(environment: .sandboxedMac)
 
         @Test func aFolderIsGrantedAsADirectoryURL() {
             engine.addItem(at: "/Users/me/Folder")
@@ -98,7 +98,7 @@ struct FakeBookmarkEngineTests {
             engine.mountVolume(at: "/Volumes/Backup")
             engine.addItem(at: "/Users/me/F")
             let grant = engine.grant("/Users/me/F", origin: .openPanel)
-            let data = try engine.makeBookmark(for: grant.url, options: [.withSecurityScope], includingResourceValuesFor: [], relativeTo: nil)
+            let data = try engine.makeBookmark(for: grant.url, options: [.scope], includingResourceValuesFor: [], relativeTo: nil)
 
             engine.moveItem(from: "/Users/me/F", to: "/Volumes/Backup/F")
 
@@ -130,7 +130,7 @@ struct FakeBookmarkEngineTests {
             base.engine.addItem(at: "/private")
 
             #expect(throws: CocoaError.self) {
-                try base.engine.makeBookmark(for: URL(filePath: "/private"), options: [.withSecurityScope], includingResourceValuesFor: [], relativeTo: nil)
+                try base.engine.makeBookmark(for: URL(filePath: "/private"), options: [.scope], includingResourceValuesFor: [], relativeTo: nil)
             }
         }
 
@@ -149,7 +149,7 @@ struct FakeBookmarkEngineTests {
             _ = try engine.makeBookmark(for: URL(filePath: "/f"), options: [], includingResourceValuesFor: [], relativeTo: nil)
         }
 
-        @Test(arguments: [URL.BookmarkCreationOptions([.withSecurityScope, .minimalBookmark]), [.withSecurityScope, .suitableForBookmarkFile]])
+        @Test(arguments: [URL.BookmarkCreationOptions([.scope, .minimalBookmark]), [.scope, .suitableForBookmarkFile]])
         func rejectsInvalidCombinations(_ options: URL.BookmarkCreationOptions) {
             #expect(throws: CocoaError.self) { try base.bookmark("/f", options: options) }
         }
@@ -161,7 +161,7 @@ struct FakeBookmarkEngineTests {
             _ = engine.startAccessing(grant.url)
 
             #expect(throws: CocoaError.self) {
-                try engine.makeBookmark(for: grant.url, options: [.withSecurityScope], includingResourceValuesFor: [], relativeTo: nil)
+                try engine.makeBookmark(for: grant.url, options: [.scope], includingResourceValuesFor: [], relativeTo: nil)
             }
         }
 
@@ -193,7 +193,7 @@ struct FakeBookmarkEngineTests {
         @Test func resolvesToTheCurrentPath() throws {
             let data = try base.bookmark("/f")
 
-            let (url, stale) = try base.engine.resolve(data, options: [.withSecurityScope], relativeTo: nil)
+            let (url, stale) = try base.engine.resolve(data, options: [.scope], relativeTo: nil)
 
             #expect(url.path(percentEncoded: false) == "/f/")
             #expect(!stale)
@@ -203,14 +203,14 @@ struct FakeBookmarkEngineTests {
             let data = try base.bookmark("/f")
             base.engine.reportStale("/f")
 
-            #expect(try base.engine.resolve(data, options: [.withSecurityScope], relativeTo: nil).isStale)
-            #expect(try !base.engine.resolve(data, options: [.withSecurityScope], relativeTo: nil).isStale)
+            #expect(try base.engine.resolve(data, options: [.scope], relativeTo: nil).isStale)
+            #expect(try !base.engine.resolve(data, options: [.scope], relativeTo: nil).isStale)
         }
 
         @Test func scopedOptionsOnPlainBookmarksAreRejected() throws {
             let data = try base.bookmark("/f", options: [])
 
-            #expect(throws: CocoaError.self) { try base.engine.resolve(data, options: [.withSecurityScope], relativeTo: nil) }
+            #expect(throws: CocoaError.self) { try base.engine.resolve(data, options: [.scope], relativeTo: nil) }
         }
 
         @Test func implicitBookmarksStartAccessUnlessTold() throws {
@@ -230,7 +230,7 @@ struct FakeBookmarkEngineTests {
             let gate = base.engine.holdResolution(of: "/f")
             let engine = base.engine
 
-            let task = Task.detached { try engine.resolve(data, options: [.withSecurityScope], relativeTo: nil) }
+            let task = Task.detached { try engine.resolve(data, options: [.scope], relativeTo: nil) }
             await gate.waitUntilReached()
             gate.open()
 

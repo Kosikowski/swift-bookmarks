@@ -465,7 +465,7 @@ struct StoreLeaseTests {
         let options = try #require(harness.engine.resolutionRequests.last?.options)
         #expect(!options.contains(.withoutMounting))
         #expect(!options.contains(.withoutUI))
-        #expect(options.contains(.withSecurityScope))
+        #expect(options.contains(.securityScope))
         #expect(harness.engine.containsItem(at: "/Volumes/Backup/Builds"))
         lease.end()
     }

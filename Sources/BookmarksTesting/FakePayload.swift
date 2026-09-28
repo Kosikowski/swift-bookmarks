@@ -7,17 +7,15 @@ enum FakeFlavor: Codable, Equatable, Sendable {
     case reference
     case alias
 
+    /// Reads the options by their bits, so the fake takes them as the platform it simulates
+    /// would, whichever platform it runs on.
     init(_ options: URL.BookmarkCreationOptions) throws {
-        #if os(macOS) || targetEnvironment(macCatalyst)
-        if options.contains(.withSecurityScope) {
+        if options.contains(.fakeSecurityScope) {
             if options.contains(.minimalBookmark) || options.contains(.suitableForBookmarkFile) {
                 throw CocoaError.error(.fileReadUnknown)
             }
-            self = .appScoped(readOnly: options.contains(.securityScopeAllowOnlyReadAccess))
-            return
-        }
-        #endif
-        if options.contains(.suitableForBookmarkFile) {
+            self = .appScoped(readOnly: options.contains(.fakeSecurityScopeReadOnly))
+        } else if options.contains(.suitableForBookmarkFile) {
             self = .alias
         } else if options.contains(.withoutImplicitSecurityScope) {
             self = .reference
@@ -34,15 +32,25 @@ enum FakeFlavor: Codable, Equatable, Sendable {
     }
 
     func checkResolution(options: URL.BookmarkResolutionOptions, document: String?, payload: FakePayload) throws {
-        #if os(macOS) || targetEnvironment(macCatalyst)
-        if options.contains(.withSecurityScope), !isScoped {
+        if options.contains(.fakeSecurityScope), !isScoped {
             throw CocoaError.error(.fileReadCorruptFile)
         }
-        #endif
         if case .documentScoped = self, payload.document != document {
             throw CocoaError.error(.fileReadCorruptFile)
         }
     }
+}
+
+extension URL.BookmarkCreationOptions {
+    /// `.withSecurityScope`, which the SDK names only on macOS and Mac Catalyst.
+    static let fakeSecurityScope = URL.BookmarkCreationOptions(rawValue: 1 << 11)
+    /// `.securityScopeAllowOnlyReadAccess`, which the SDK names only on macOS and Mac Catalyst.
+    static let fakeSecurityScopeReadOnly = URL.BookmarkCreationOptions(rawValue: 1 << 12)
+}
+
+extension URL.BookmarkResolutionOptions {
+    /// `.withSecurityScope`, which the SDK names only on macOS and Mac Catalyst.
+    static let fakeSecurityScope = URL.BookmarkResolutionOptions(rawValue: 1 << 10)
 }
 
 struct FakePayload: Codable, Sendable {

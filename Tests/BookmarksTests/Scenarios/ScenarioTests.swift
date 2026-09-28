@@ -57,7 +57,7 @@ struct DocumentBookmarksTests {
         _ = try await readOnly.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
 
         #expect(readOnly.kind == .documentScoped(.readOnly))
-        #expect(engine.creationRequests.last?.options == [.withSecurityScope, .securityScopeAllowOnlyReadAccess])
+        #expect(engine.creationRequests.last?.options == [.securityScope, .securityScopeReadOnly])
     }
 
     @Test func refusesFolderTargets() async {
@@ -178,12 +178,14 @@ struct HandoffTests {
         lease.end()
         let gate = engine.holdResolution(of: "/Users/me/Shared")
         let handoff = Fixtures.service(engine, timeout: .milliseconds(30)).handoff
+        let stops = engine.calls.stops
 
         let error = await #expect(throws: BookmarkError.self) { try await handoff.receive(token) }
         gate.open()
 
         #expect(error?.failure == .timedOut)
-        while !engine.isBalanced {
+        // Balanced before the abandoned resolution even starts access, so wait for its stop.
+        while engine.calls.stops == stops || !engine.isBalanced {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(engine.isBalanced)
