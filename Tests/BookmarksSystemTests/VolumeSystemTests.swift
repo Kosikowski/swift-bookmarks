@@ -8,9 +8,21 @@ struct DiskImage {
     let name = "BMTest-\(UUID().uuidString.prefix(8))"
     let folder = TemporaryDirectory()
 
-    static var isAvailable: Bool {
-        FileManager.default.isExecutableFile(atPath: "/usr/bin/hdiutil")
-    }
+    /// Whether this machine lets the tests create and attach disk images. Some CI machines
+    /// don't, and the tests then don't run rather than fail.
+    static let canAttach: Bool = {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/hdiutil") else { return false }
+        let probe = DiskImage()
+        defer { probe.destroy() }
+        do {
+            try probe.create()
+            try probe.attach()
+            try probe.detach()
+            return true
+        } catch {
+            return false
+        }
+    }()
 
     var file: URL { folder.url("\(name).dmg") }
     var mountPoint: URL { URL(filePath: "/Volumes/\(name)", directoryHint: .isDirectory) }
@@ -47,7 +59,7 @@ struct DiskImage {
     }
 }
 
-@Suite("System: volumes", .serialized, .enabled(if: DiskImage.isAvailable), .timeLimit(.minutes(2)))
+@Suite("System: volumes", .serialized, .enabled(if: DiskImage.canAttach), .timeLimit(.minutes(2)))
 struct VolumeSystemTests {
     @Test func itemsOnADetachedDiskAreUnavailableNotGoneAndComeBack() async throws {
         let image = DiskImage()
