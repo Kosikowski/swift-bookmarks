@@ -57,7 +57,7 @@ struct DocumentBookmarksTests {
         _ = try await readOnly.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
 
         #expect(readOnly.kind == .documentScoped(.readOnly))
-        #expect(engine.creationRequests.last?.options == [.withSecurityScope, .securityScopeAllowOnlyReadAccess])
+        #expect(engine.creationRequests.last?.options == [.securityScope, .securityScopeReadOnly])
     }
 
     @Test func refusesFolderTargets() async {
@@ -94,14 +94,30 @@ struct DocumentBookmarksTests {
         #expect(error?.failure == .missing)
     }
 
+    /// As the integration host found on macOS 27: an anchor without a key refuses (256), one
+    /// with its own key doesn't match (259).
     @Test func resolvingAgainstAnotherDocumentFails() async throws {
         let data = try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
         engine.addItem(at: "/Users/me/Other.pages", isDirectory: false)
+        engine.addItem(at: "/Users/me/Images/photo.png", isDirectory: false)
         let other = Fixtures.service(engine).documents(anchoredOn: URL(filePath: "/Users/me/Other.pages"))
 
-        let error = await #expect(throws: BookmarkError.self) { try await other.resolve(data) }
+        let withoutKey = await #expect(throws: BookmarkError.self) { try await other.resolve(data) }
+        _ = try await other.create(for: engine.grant("/Users/me/Images/photo.png", origin: .openPanel))
+        let withKey = await #expect(throws: BookmarkError.self) { try await other.resolve(data) }
 
-        #expect(error?.failure == .needsRegrant)
+        #expect(withoutKey?.failure == .denied)
+        #expect(withKey?.failure == .needsRegrant)
+    }
+
+    @Test func aDeletedTargetIsMissing() async throws {
+        let data = try await documents.create(for: engine.grant("/Users/me/Images/chart.png", origin: .openPanel))
+        engine.removeItem(at: "/Users/me/Images/chart.png")
+
+        let error = await #expect(throws: BookmarkError.self) { try await documents.resolve(data) }
+
+        #expect(error?.failure == .missing)
+        #expect((error?.underlying as? NSError)?.code == NSFileReadCorruptFileError)
     }
 
     @Test func unsupportedOnIOS() async {
@@ -178,12 +194,14 @@ struct HandoffTests {
         lease.end()
         let gate = engine.holdResolution(of: "/Users/me/Shared")
         let handoff = Fixtures.service(engine, timeout: .milliseconds(30)).handoff
+        let stops = engine.calls.stops
 
         let error = await #expect(throws: BookmarkError.self) { try await handoff.receive(token) }
         gate.open()
 
         #expect(error?.failure == .timedOut)
-        while !engine.isBalanced {
+        // Balanced before the abandoned resolution even starts access, so wait for its stop.
+        while engine.calls.stops == stops || !engine.isBalanced {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(engine.isBalanced)

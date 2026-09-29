@@ -116,7 +116,7 @@ struct StoreLeaseTests {
             try await harness.add("a", "/Users/me/A")
             harness.engine.moveItem(from: "/Users/me/A", to: "/Users/me/Renamed")
             try await harness.store.lease("a").end()
-            let data = try #require(try await harness.store.record("a")).data
+            let data = try #require(try await harness.store.record("a")?.data)
 
             let resolved = try await harness.store.service.resolve(data)
 
@@ -465,7 +465,7 @@ struct StoreLeaseTests {
         let options = try #require(harness.engine.resolutionRequests.last?.options)
         #expect(!options.contains(.withoutMounting))
         #expect(!options.contains(.withoutUI))
-        #expect(options.contains(.withSecurityScope))
+        #expect(options.contains(.securityScope))
         #expect(harness.engine.containsItem(at: "/Volumes/Backup/Builds"))
         lease.end()
     }

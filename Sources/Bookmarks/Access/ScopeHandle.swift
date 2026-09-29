@@ -21,11 +21,15 @@ final class ScopeHandle: Sendable {
     let access: AccessMode?
     private let engine: any BookmarkEngine
     private let ledger: ScopeLedger?
+    private let startsAccess: Bool
     private let state: Mutex<State>
     private let onIdle: (@Sendable (ScopeHandle) -> Void)?
 
-    /// - Parameter alreadyStarted: The URL arrived with access already started by the system,
-    ///   so the first acquisition takes ownership of that start instead of starting again.
+    /// - Parameters:
+    ///   - alreadyStarted: The URL arrived with access already started by the system, so the
+    ///     first acquisition takes ownership of that start instead of starting again.
+    ///   - startsAccess: Whether acquiring starts access. `false` for locations the app
+    ///     reaches without a scope.
     init(
         url: URL,
         engine: any BookmarkEngine,
@@ -33,11 +37,13 @@ final class ScopeHandle: Sendable {
         access: AccessMode? = .readWrite,
         isCaseSensitive: Bool = true,
         alreadyStarted: Bool = false,
+        startsAccess: Bool = true,
         onIdle: (@Sendable (ScopeHandle) -> Void)? = nil
     ) {
         self.url = url
         self.ledger = ledger
         self.access = access
+        self.startsAccess = startsAccess
         path = NormalizedPath(url, isCaseSensitive: isCaseSensitive)
         self.engine = engine
         self.onIdle = onIdle
@@ -68,7 +74,7 @@ final class ScopeHandle: Sendable {
                     state.adoptsSystemStart = false
                     state.didStart = true
                 } else {
-                    state.didStart = engine.startAccessing(url)
+                    state.didStart = startsAccess && engine.startAccessing(url)
                 }
                 ledger?.activated(self, started: state.didStart)
             }

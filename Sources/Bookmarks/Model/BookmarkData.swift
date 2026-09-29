@@ -17,6 +17,10 @@ public struct BookmarkData: Sendable, Hashable, Codable, CustomStringConvertible
     /// The number of bytes in the bookmark.
     public var count: Int { rawValue.count }
 
+    /// Whether there are no bytes. Bookmark bytes are never empty, and a record reads empty
+    /// bytes as holding no bookmark.
+    public var isEmpty: Bool { rawValue.isEmpty }
+
     public init(from decoder: any Decoder) throws {
         rawValue = try decoder.singleValueContainer().decode(Data.self)
     }

@@ -2,7 +2,9 @@
 
 Researched on 2026-09-23. Sources: the Xcode 27.0 SDK headers and Swift interfaces (MacOSX27.0, iPhoneOS27.0, XROS27.0), the DocC JSON behind developer.apple.com, the archived App Sandbox Design Guide (through the Wayback Machine, because the live archive URL now redirects), Apple Developer Forums posts by DTS engineers (Quinn "The Eskimo!" and Kevin Elliott), and blog posts.
 
-I also ran my own experiments on macOS 26.6.2 (25G83) with an unsandboxed CLI. Results from those runs are marked **[EXP]**. I could not run a sandboxed experiment: an ad-hoc-signed sandboxed CLI crashed with SIGTRAP at sandbox initialisation, probably because the harness is itself sandboxed. So none of the sandbox-only behaviour below was checked empirically. **[UNVERIFIED]** marks claims I could not confirm.
+I also ran my own experiments on macOS 26.6.2 (25G83) with an unsandboxed CLI. Results from those runs are marked **[EXP]**. I could not run a sandboxed experiment: an ad-hoc-signed sandboxed CLI crashed with SIGTRAP at sandbox initialisation, probably because the harness is itself sandboxed. **[UNVERIFIED]** marks claims I could not confirm.
+
+On 2026-09-28 the integration host's hosted tests ran inside the App Sandbox on macOS 27.0 (26A428): an ad-hoc-signed app with `user-selected.read-write`, `bookmarks.app-scope`, `bookmarks.document-scope` and `downloads.read-write`, working on files in `~/Downloads`. Results from those runs are marked **[SANDBOX]**; the tests in `IntegrationHost/Tests` repeat them.
 
 ---
 
@@ -73,7 +75,21 @@ Notes:
    - Restrictions:
      - The target must be a **file, not a folder**.
      - The target must not be in system locations such as `/private` or `/Library` (App Sandbox Design Guide). Kevin Elliott adds that the "anchor" must also be a file.
-   - The key is stored in the document's extended attribute `com.apple.security.private.scoped-bookmark-key` (Mothers' Ruin). So **anything that strips xattrs from the document breaks every bookmark inside it**, including some copy tools, archives and non-Apple sync services. **[UNVERIFIED]** I did not test the exact failure mode.
+   - The key is stored in the document's extended attribute `com.apple.security.private.scoped-bookmark-key` (Mothers' Ruin). **[SANDBOX]** Creating the first bookmark adds it; the sandboxed app can list it but `getxattr` fails with EPERM, so the app can't copy it to another file. One key serves every bookmark anchored on the document.
+   - **Document-scoped bookmarks and saving the anchor [SANDBOX].**
+
+     | What happened to the anchor | Bookmarks in it |
+     |---|---|
+     | Written in place (truncate and write) | resolve |
+     | Moved or renamed; copied with `FileManager.copyItem` | resolve, from the new path too |
+     | Replaced with `FileManager.replaceItemAt(_:withItemAt:)` | resolve (the new file keeps the old one's xattrs) |
+     | Saved by `NSDocument` (`save(to:ofType:for: .saveOperation)`, a new inode) | resolve |
+     | Replaced with `Data.write(to:options: .atomic)` | **fail with 256** ("The file couldn't be opened"): the key is gone |
+     | Atomically replaced, then a new bookmark created | the new one resolves; the old ones fail with **259**: the new file got a new key |
+
+     So **anything that writes the document as a new file without its xattrs breaks every bookmark inside it**: plain atomic writes, and presumably tools that strip xattrs (copy tools, archives, some sync services). Resolving against another file fails with 256 when it has no key and 259 when it has its own; resolving with no anchor fails with 259.
+   - **[SANDBOX]** Targets in the app's container (`~/Library/Containers/<id>/Data/Documents`) or its temporary folder are refused at creation with 256 "Item URL disallowed by security policy", although app-scoped bookmarks to them work. A target in `~/Downloads` reached through the entitlement works.
+   - **[SANDBOX]** A document-scoped target renamed resolves stale, and the refresh (start, create relative to the same anchor, stop) works; an atomically replaced target resolves stale by path.
    - **[EXP]** Unsandboxed and without the entitlement, creation fails with 256 "The file couldn't be opened."
    - Forum reports describe 256 "Item URL disallowed by security policy" even *with* the entitlement on macOS 26 ([798402 p.2](https://developer.apple.com/forums/thread/798402?page=2)).
 6. **Alias files** (`.suitableForBookmarkFile`, `URL.writeBookmarkData`, `bookmarkData(withContentsOf:)`, `URL(resolvingAliasFileAt:)`).
@@ -200,7 +216,7 @@ Pitfalls:
 |---|---|---|
 | 4 | `NSFileNoSuchFileError` | Target deleted, or not locatable **[EXP]**. Volume not mounted and `.withoutMounting` passed **[EXP]** |
 | 256 | `NSFileReadUnknownError` | Scope or security problems: "Failed to retrieve app-scope key" (ScopedBookmarksAgent hang, macOS 15.0–15.1, r.140342863). "Couldn't issue sandbox extension for the resolved URL" (`/System/Volumes/Data/...`, FB9843248, [697939](https://developer.apple.com/forums/thread/697939)). "Item URL disallowed by security policy". Invalid option combinations **[EXP]**. Document-scope entitlement missing |
-| 259 | `NSFileReadCorruptFileError` | Garbage data **[EXP]**. Scope-key mismatch (bookmark from another app or signing identity, or the 14.7.5 key reset). Plain bookmark resolved with `.withSecurityScope` **[EXP]** |
+| 259 | `NSFileReadCorruptFileError` | Garbage data **[EXP]**. Scope-key mismatch (bookmark from another app or signing identity, or the 14.7.5 key reset). Plain bookmark resolved with `.withSecurityScope` **[EXP]**. **Inside the sandbox, an app- or document-scoped bookmark whose item was deleted, with an empty `userInfo`** **[SANDBOX]**; unsandboxed, the same bookmark fails with 4, and a reference bookmark fails with 4 in both. Only the absence of anything at the recorded path tells deletion from a key mismatch |
 | 260 | `NSFileReadNoSuchFileError` | *Creating* a bookmark for a file that does not exist **[EXP]**. Save-panel URLs before the file is written ([756502](https://developer.apple.com/forums/thread/756502)) |
 | 512 | `NSFileWriteUnknownError` | `writeBookmarkData` with non-alias data **[EXP]** |
 | 257 / POSIX 1 (EPERM) | | Access denied by sandbox or MAC *after* resolving. BSD permissions give EACCES (13). Check `NSUnderlyingErrorKey` ([Quinn, On File System Permissions](https://developer.apple.com/forums/thread/678819)) |
@@ -300,5 +316,5 @@ What these libraries don't handle, and a new package could: per-platform strateg
 - Bookmark behaviour after an App Store team transfer or bundle-ID change (inferred to break).
 - The real OS introduction of `.withoutImplicitSecurityScope`.
 - Resolution of evicted iCloud items.
-- Document-scope xattr-stripping failures.
+- ~~Document-scope xattr-stripping failures.~~ Answered for atomic writes **[SANDBOX]** (§3); tools that strip xattrs weren't run, but they leave the document in the same state as a plain atomic write.
 - Whether any iOS 17 or 18 specific bookmark regressions exist. I found none documented beyond r.102995804 and r.150542999.

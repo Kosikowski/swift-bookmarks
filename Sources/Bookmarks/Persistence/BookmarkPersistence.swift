@@ -17,8 +17,8 @@ public protocol BookmarkPersistence<Key, Metadata>: Sendable {
     /// Replaces all stored records.
     func save(_ records: [BookmarkRecord<Key, Metadata>]) throws(PersistenceError)
 
-    /// Whether ``load()`` returns each record's status, file identity, last known path and
-    /// dates as they were saved. Defaults to `true`.
+    /// Whether ``load()`` returns each record's status, file identity, last known path, dates
+    /// (including ``BookmarkRecord/lastUsedAt``) and pin as they were saved. Defaults to `true`.
     ///
     /// Return `false` from an adapter for a format that keeps only keys, bookmark bytes and
     /// metadata. The store then keeps those fields in memory for every record whose bytes and

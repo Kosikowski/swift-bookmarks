@@ -99,14 +99,13 @@ struct BookmarkKindTests {
         }
     }
 
-    #if os(macOS)
     @Suite("Options")
     struct Options {
         @Test func creationOptionsPerKind() {
-            #expect(BookmarkKind.appScoped(.readWrite).creationOptions == [.withSecurityScope])
-            #expect(BookmarkKind.appScoped(.readOnly).creationOptions == [.withSecurityScope, .securityScopeAllowOnlyReadAccess])
-            #expect(BookmarkKind.documentScoped(.readWrite).creationOptions == [.withSecurityScope])
-            #expect(BookmarkKind.documentScoped(.readOnly).creationOptions == [.withSecurityScope, .securityScopeAllowOnlyReadAccess])
+            #expect(BookmarkKind.appScoped(.readWrite).creationOptions == [.securityScope])
+            #expect(BookmarkKind.appScoped(.readOnly).creationOptions == [.securityScope, .securityScopeReadOnly])
+            #expect(BookmarkKind.documentScoped(.readWrite).creationOptions == [.securityScope])
+            #expect(BookmarkKind.documentScoped(.readOnly).creationOptions == [.securityScope, .securityScopeReadOnly])
             #expect(BookmarkKind.implicit.creationOptions == [])
             #expect(BookmarkKind.reference.creationOptions == [.withoutImplicitSecurityScope])
             #expect(BookmarkKind.alias.creationOptions == [.suitableForBookmarkFile])
@@ -128,10 +127,10 @@ struct BookmarkKindTests {
         }
 
         @Test func scopedKindsResolveWithSecurityScope() {
-            #expect(BookmarkKind.appScoped(.readOnly).resolutionOptions(.default).contains(.withSecurityScope))
-            #expect(BookmarkKind.documentScoped(.readWrite).resolutionOptions(.default).contains(.withSecurityScope))
-            #expect(!BookmarkKind.implicit.resolutionOptions(.default).contains(.withSecurityScope))
-            #expect(!BookmarkKind.reference.resolutionOptions(.default).contains(.withSecurityScope))
+            #expect(BookmarkKind.appScoped(.readOnly).resolutionOptions(.default).contains(.securityScope))
+            #expect(BookmarkKind.documentScoped(.readWrite).resolutionOptions(.default).contains(.securityScope))
+            #expect(!BookmarkKind.implicit.resolutionOptions(.default).contains(.securityScope))
+            #expect(!BookmarkKind.reference.resolutionOptions(.default).contains(.securityScope))
         }
 
         @Test func implicitKindDefersStartingAccess() {
@@ -143,8 +142,15 @@ struct BookmarkKindTests {
         func accessFreeKindsNeverStartAccess(_ kind: BookmarkKind) {
             #expect(kind.resolutionOptions(ResolutionPolicy(startsImplicitAccess: true)).contains(.withoutImplicitStartAccessing))
         }
+
+        #if os(macOS) || targetEnvironment(macCatalyst)
+        @Test func scopeBitsAreTheSDKsOptions() {
+            #expect(URL.BookmarkCreationOptions.securityScope == .withSecurityScope)
+            #expect(URL.BookmarkCreationOptions.securityScopeReadOnly == .securityScopeAllowOnlyReadAccess)
+            #expect(URL.BookmarkResolutionOptions.securityScope == .withSecurityScope)
+        }
+        #endif
     }
-    #endif
 }
 
 extension BookmarkKind {

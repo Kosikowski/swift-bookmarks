@@ -37,8 +37,8 @@ struct CreateAndAdoptTests {
         }
 
         static let expectedOptions: [URL.BookmarkCreationOptions] = [
-            [.withSecurityScope],
-            [.withSecurityScope, .securityScopeAllowOnlyReadAccess],
+            [.securityScope],
+            [.securityScope, .securityScopeReadOnly],
             [],
             [.withoutImplicitSecurityScope],
             [.suitableForBookmarkFile],
@@ -61,7 +61,7 @@ struct CreateAndAdoptTests {
 
             _ = try await service.create(for: engine.grant("/Users/me/Folder", origin: .fileImporter))
 
-            #expect(engine.creationRequests.last?.options == [.withSecurityScope])
+            #expect(engine.creationRequests.last?.options == [.securityScope])
         }
 
         @Test func alreadyAccessibleGrantsAreNotStarted() async throws {

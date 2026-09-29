@@ -103,6 +103,16 @@ public final class Grant: Sendable {
         balance(stops)
     }
 
+    /// Marks the grant used without balancing the system's start, which the caller takes
+    /// over. Returns `false` when the grant is in use or used.
+    func takeOver() -> Bool {
+        use.withLock { use in
+            guard case .unused = use else { return false }
+            use = .used
+            return true
+        }
+    }
+
     /// Reserves the grant for one bookmark creation. Returns `false` when it's already in
     /// use or used, so one grant never backs two creations at once.
     func claim() -> Bool {

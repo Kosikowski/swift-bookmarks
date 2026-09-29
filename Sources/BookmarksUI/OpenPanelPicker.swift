@@ -45,6 +45,11 @@ extension BookmarkStore {
     /// Asks the user to pick the item for `key` again, starting next to its last known
     /// location, and replaces its bookmark.
     ///
+    /// ``regrantWithDocumentPicker(_:from:fileTypes:)`` does the same with the document picker
+    /// on iOS, visionOS and Mac Catalyst, and the SwiftUI
+    /// `bookmarkRegrant(of:in:message:prompt:fileTypes:onCompletion:)` modifier does it on
+    /// every platform.
+    ///
     /// - Returns: The updated record, or `nil` when the user cancelled.
     @MainActor
     public func regrantWithOpenPanel(
@@ -53,17 +58,8 @@ extension BookmarkStore {
         prompt: String? = nil,
         attachedTo window: NSWindow? = nil
     ) async throws(Failure) -> Record? {
-        guard let record = try await record(key) else { throw .notFound(key) }
-        let configuration = RegrantConfiguration.make(
-            for: record,
-            recorded: service.recordedValues(in: record.data),
-            message: message,
-            prompt: prompt
-        )
-        guard let grant = await OpenPanelPicker.choose(configuration, attachedTo: window).first else {
-            return nil
-        }
-        return try await regrant(key, with: grant)
+        let configuration = try await regrantConfiguration(for: key, message: message, prompt: prompt)
+        return try await regrant(key, withFirstOf: await OpenPanelPicker.choose(configuration, attachedTo: window))
     }
 }
 #endif

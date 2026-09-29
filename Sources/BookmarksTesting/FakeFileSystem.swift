@@ -9,7 +9,15 @@ struct FakeItem: Sendable {
 
 struct ScriptedFailure: Sendable {
     let error: NSError
+    /// How many more calls fail; `nil` for every call until cleared.
     var remaining: Int?
+
+    /// A failure for `times` calls, or `nil` when that's none.
+    init?(error: NSError, times: Int?) {
+        if let times, times <= 0 { return nil }
+        self.error = error
+        remaining = times
+    }
 }
 
 struct FakeFileSystem: Sendable {
@@ -20,15 +28,21 @@ struct FakeFileSystem: Sendable {
     var volumesWithoutUUID: Set<String> = []
     var freelyAccessible: Set<String> = []
     var aliasFiles: [String: BookmarkData] = [:]
+    /// The key of document-scoped bookmarks anchored on an item, by item, as the system keeps
+    /// it in the item's extended attributes.
+    var documentKeys: [UInt64: Int] = [:]
+    var nextDocumentKey = 1
 
     var issued: Set<String> = []
     var outstanding: [String: Int] = [:]
     var unbalancedStops: [String] = []
     var unissuedStarts: [String] = []
     var refused: Set<String> = []
+    var uninspectable: Set<String> = []
 
     var resolutionFailures: [String: ScriptedFailure] = [:]
     var creationFailures: [String: ScriptedFailure] = [:]
+    var replacementFailures: [String: ScriptedFailure] = [:]
     var forcedStale: [String: Int] = [:]
     var gates: [String: [FakeBookmarkEngine.Gate]] = [:]
     var creationGates: [String: [FakeBookmarkEngine.Gate]] = [:]
@@ -74,6 +88,10 @@ struct FakeFileSystem: Sendable {
 
     func path(ofItem id: UInt64) -> String? {
         items.first { $0.value.id == id && mountedVolumes.contains(Self.volume(of: $0.key)) }?.key
+    }
+
+    func isUninspectable(_ path: String) -> Bool {
+        uninspectable.contains { Self.isDescendant(path, of: $0) }
     }
 
     func hasAccess(to path: String) -> Bool {
@@ -123,10 +141,25 @@ struct FakeFileSystem: Sendable {
         }
     }
 
-    mutating func replaceItem(at path: String) {
+    mutating func replaceItem(at path: String, keepingExtendedAttributes: Bool) {
         guard let existing = items[path] else { return }
         items[path] = FakeItem(id: nextItemID, isDirectory: existing.isDirectory)
+        if let key = documentKeys.removeValue(forKey: existing.id), keepingExtendedAttributes {
+            documentKeys[nextItemID] = key
+        }
         nextItemID += 1
+    }
+
+    /// The document key of the item at `path`, making one when it has none.
+    mutating func documentKey(at path: String) -> Int? {
+        guard let item = item(at: path) else { return nil }
+        if let key = documentKeys[item.id] {
+            return key
+        }
+        let key = nextDocumentKey
+        nextDocumentKey += 1
+        documentKeys[item.id] = key
+        return key
     }
 
     mutating func recordStart(_ path: String) {
@@ -137,7 +170,7 @@ struct FakeFileSystem: Sendable {
         guard var failure = failures[path] else { return nil }
         if let remaining = failure.remaining {
             failure.remaining = remaining - 1
-            failures[path] = remaining - 1 > 0 ? failure : nil
+            failures[path] = remaining > 1 ? failure : nil
         }
         return failure.error
     }

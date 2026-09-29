@@ -6,14 +6,14 @@ import Testing
 @Suite("BalanceReport")
 struct BalanceReportTests {
     @Test func describesABalancedEngine() {
-        let engine = FakeBookmarkEngine()
+        let engine = FakeBookmarkEngine(environment: .sandboxedMac)
 
         #expect(engine.balanceReport.isBalanced)
         #expect(engine.balanceReport.description == "balanced")
     }
 
     @Test func describesEveryProblem() {
-        let engine = FakeBookmarkEngine()
+        let engine = FakeBookmarkEngine(environment: .sandboxedMac)
         engine.addItem(at: "/b")
         engine.addItem(at: "/a")
         let grants = [
@@ -32,7 +32,7 @@ struct BalanceReportTests {
     }
 
     @Test func startsOnUnissuedURLsAloneDontUnbalance() {
-        let engine = FakeBookmarkEngine()
+        let engine = FakeBookmarkEngine(environment: .sandboxedMac)
         _ = engine.startAccessing(URL(filePath: "/rebuilt"))
 
         #expect(engine.isBalanced)

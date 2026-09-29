@@ -20,6 +20,12 @@ import Synchronization
 ///
 /// A persistence for a format that can't hold a record's status, identity, path or dates says
 /// so with ``BookmarkPersistence/storesRecordState``, and the store keeps them in memory.
+///
+/// ``snapshot`` gives the records synchronously, for code that can't wait. Records without a
+/// bookmark, added with ``add(pathOnly:key:metadata:)``, are found by path and get a bookmark
+/// as soon as one can be made. With a ``StorePolicy/limit``, the policy's
+/// ``StorePolicy/eviction`` decides which records go, and ``evictions(bufferingPolicy:)``
+/// reports them.
 public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equatable> {
     public typealias Record = BookmarkRecord<Key, Metadata>
     public typealias Failure = BookmarkStoreError<Key>
@@ -44,6 +50,8 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     private let writes = AsyncLock()
     private var resolutions: [Flight: Resolution] = [:]
     private let observers = Mutex<[UUID: AsyncStream<StoreUpdate<Key, Metadata>>.Continuation]>([:])
+    private let evictionObservers = Mutex<[UUID: AsyncStream<StoreEviction<Key, Metadata>>.Continuation]>([:])
+    private let published = Mutex(StoreSnapshot<Key, Metadata>(isLoaded: false))
     private let now: @Sendable () -> Date
 
     private struct Flight: Hashable, Sendable {
@@ -86,6 +94,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
 
     deinit {
         observers.withLock { $0.values.forEach { $0.finish() } }
+        evictionObservers.withLock { $0.values.forEach { $0.finish() } }
     }
 
     // MARK: - Loading
@@ -105,6 +114,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         case .success(let records):
             table = Table(records)
             isLoaded = true
+            publishSnapshot()
         case .failure(let error):
             throw .persistence(error)
         }
@@ -122,8 +132,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             }
             let old = table
             table.replaceAll(with: records, keepingKnownState: !persistence.storesRecordState)
-            let (changes, invalidated) = table.takeChanges(since: old)
-            finish(changes, invalidating: invalidated)
+            publish(table.takeChanges(since: old))
         }
     }
 
@@ -143,6 +152,16 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     }
 
     // MARK: - Reading
+
+    /// The records as of the last change this store saved or loaded, readable synchronously
+    /// from any thread.
+    ///
+    /// It's empty, with ``StoreSnapshot/isLoaded`` `false`, until the records load; call
+    /// ``load()`` at launch. It changes before ``updates(bufferingPolicy:)`` reports the change,
+    /// so a subscriber that reads it on an update sees at least that change.
+    public nonisolated var snapshot: StoreSnapshot<Key, Metadata> {
+        published.withLock { $0 }
+    }
 
     /// All records in the policy's order, including unavailable ones.
     public func records() async throws(Failure) -> [Record] {
@@ -195,6 +214,26 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         return stream
     }
 
+    /// Every record the store removes on its own from now on: records evicted beyond
+    /// ``StorePolicy/limit``, and records ``StorePolicy/failureHandling`` drops when they fail
+    /// to resolve.
+    ///
+    /// Apps that keep their own data under the store's keys clear it here. Call it before
+    /// adding records, such as right after creating the store; each call returns a new
+    /// stream. Records removed with ``forget(_:)`` aren't reported, and records another process
+    /// removed arrive only as ``StoreChange/removed(_:)`` updates.
+    public nonisolated func evictions(
+        bufferingPolicy: AsyncStream<StoreEviction<Key, Metadata>>.Continuation.BufferingPolicy = .unbounded
+    ) -> AsyncStream<StoreEviction<Key, Metadata>> {
+        let (stream, continuation) = AsyncStream<StoreEviction<Key, Metadata>>.makeStream(bufferingPolicy: bufferingPolicy)
+        let id = UUID()
+        evictionObservers.withLock { $0[id] = continuation }
+        continuation.onTermination = { [weak self] _ in
+            self?.evictionObservers.withLock { _ = $0.removeValue(forKey: id) }
+        }
+        return stream
+    }
+
     // MARK: - Adding and removing
 
     /// Adopts a granted item and stores it under `key`, replacing any record for `key`.
@@ -218,11 +257,51 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         let context = try await prepare(grant, excluding: key)
         let resolved = try await adopt(grant, for: key, context: context)
         let record = try await insert(
-            Item(data: resolved.data, kind: kind, location: resolved.handle.path, identity: resolved.fileIdentity, status: .available),
+            Item(
+                data: resolved.data,
+                kind: kind,
+                location: resolved.handle.path,
+                identity: resolved.fileIdentity,
+                status: .available,
+                lastUsedAt: now()
+            ),
             key: key,
             metadata: metadata
         )
         return (record, resolved)
+    }
+
+    /// Stores `url` without a bookmark under `key`, replacing any record for `key`.
+    ///
+    /// Use it for an item the app knows only by its path, or when making a bookmark failed.
+    /// The record's ``BookmarkRecord/data`` is `nil`, and the store finds the item by
+    /// ``BookmarkRecord/lastKnownPath`` alone, so it doesn't follow moves. Leasing the record
+    /// or refreshing statuses makes a bookmark of the record's kind, the store's kind when it
+    /// was added, as soon as the app can reach the item, such as while it holds access to a
+    /// folder that contains it; to make one from a grant, call ``regrant(_:with:)``. Until then,
+    /// leasing fails as making the bookmark did, such as with ``BookmarkFailure/denied`` inside
+    /// the App Sandbox.
+    ///
+    /// Duplicates are handled as by ``add(_:key:metadata:)``, by identity when the item can be
+    /// inspected and by path otherwise. Validators don't run, because the item isn't accessed.
+    @discardableResult
+    public func add(pathOnly url: URL, key: Key, metadata: Metadata) async throws(Failure) -> Record {
+        try checkPersistableKind()
+        try await load()
+        let url = url.standardizedFileURL
+        let (identity, isCaseSensitive) = await inspect(url)
+        return try await insert(
+            Item(
+                data: nil,
+                kind: kind,
+                location: NormalizedPath(url, isCaseSensitive: isCaseSensitive),
+                identity: identity,
+                status: .unknown,
+                lastUsedAt: now()
+            ),
+            key: key,
+            metadata: metadata
+        )
     }
 
     /// Stores a bookmark another store keeps, such as when an item moves from one list to
@@ -232,14 +311,16 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     /// so an item that can't be reached now moves too. Validators don't run, because the item
     /// isn't accessed. Duplicates are handled as by ``add(_:key:metadata:)``; with
     /// ``DuplicateHandling/returnExisting`` the existing record takes the copied bytes and
-    /// status.
+    /// status. A pinned record stays pinned, and a copy never unpins a record it replaces or
+    /// merges into. A path-only record gets its bookmark in this store's kind.
     @discardableResult
     public func add<OtherKey, OtherMetadata>(
         copyOf other: BookmarkRecord<OtherKey, OtherMetadata>,
         key: Key,
         metadata: Metadata
     ) async throws(Failure) -> Record {
-        if other.kind == .implicit, service.environment.supportsSecurityScope {
+        let copiedKind = other.hasBookmark ? other.kind : kind
+        if copiedKind == .implicit, service.environment.supportsSecurityScope {
             throw .bookmark(BookmarkError(.unsupported(reason: Self.persistedImplicitReason)))
         }
         try await load()
@@ -247,10 +328,12 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         return try await insert(
             Item(
                 data: other.data,
-                kind: other.kind,
+                kind: copiedKind,
                 location: NormalizedPath(other.lastKnownPath, isCaseSensitive: isCaseSensitive),
                 identity: other.fileIdentity,
-                status: other.status
+                status: other.status,
+                lastUsedAt: other.lastUsedAt,
+                isPinned: other.isPinned
             ),
             key: key,
             metadata: metadata
@@ -258,11 +341,13 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     }
 
     private struct Item: Sendable {
-        let data: BookmarkData
+        let data: BookmarkData?
         let kind: BookmarkKind
         let location: NormalizedPath
         let identity: FileIdentity?
         let status: RecordStatus
+        let lastUsedAt: Date?
+        var isPinned = false
     }
 
     private func insert(_ item: Item, key: Key, metadata: Metadata) async throws(Failure) -> Record {
@@ -272,6 +357,14 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             if policy.duplicates != .allow,
                let existing = table.duplicate(of: item.identity, path: item.location, excluding: key) {
                 guard policy.duplicates == .returnExisting else { throw .duplicate(of: existing.key) }
+                if item.isPinned {
+                    _ = table.setPinned(existing.key, true)
+                }
+                // A path says nothing new about an item the store holds a bookmark for.
+                if item.data == nil, existing.hasBookmark {
+                    _ = table.markUsed(existing.key, at: item.lastUsedAt ?? timestamp, ordering: policy.ordering)
+                    return table[existing.key] ?? existing
+                }
                 return table.replaceItem(
                     of: existing.key,
                     data: item.data,
@@ -280,6 +373,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
                     identity: item.identity,
                     status: item.status,
                     date: timestamp,
+                    usedAt: item.lastUsedAt,
                     ordering: policy.ordering
                 ) ?? existing
             }
@@ -293,15 +387,19 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
                 status: item.status,
                 createdAt: previous?.createdAt ?? timestamp,
                 refreshedAt: previous == nil ? nil : timestamp,
+                lastUsedAt: item.lastUsedAt,
+                isPinned: item.isPinned || previous?.isPinned == true,
                 metadata: metadata
             )
             table.put(record, ordering: policy.ordering)
-            table.evict(beyond: policy.limit, keeping: key, ordering: policy.ordering)
+            table.evict(beyond: policy.limit, keeping: key, ordering: policy.ordering, policy: policy.eviction)
             return record
         }
     }
 
     /// Replaces the bookmark for `key` with a newly granted item, keeping the key and metadata.
+    ///
+    /// This also gives a path-only record its bookmark.
     ///
     /// Unless ``StorePolicy/duplicates`` is ``DuplicateHandling/allow``, re-granting an item
     /// stored under another key fails with ``BookmarkStoreError/duplicate(of:)``. The grant is
@@ -332,6 +430,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
                 path: path,
                 identity: resolved.fileIdentity,
                 date: timestamp,
+                usedAt: timestamp,
                 ordering: policy.ordering
             ) else {
                 throw .notFound(key)
@@ -350,10 +449,71 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         }
     }
 
+    /// Removes every record `predicate` matches, in one save. Active leases keep access until
+    /// they end.
+    ///
+    /// ```swift
+    /// let gone = try await store.forget { $0.isGone }
+    /// ```
+    ///
+    /// `predicate` runs on the records as they are when the change is saved, which may
+    /// include changes made by another process.
+    ///
+    /// - Returns: The removed keys, in the store's order.
+    @discardableResult
+    public func forget(where predicate: @escaping @Sendable (Record) -> Bool) async throws(Failure) -> [Key] {
+        try await mutate { table throws(Failure) in
+            table.removeAll(where: predicate)
+        }
+    }
+
     /// Removes every record. Active leases keep access until they end.
     public func removeAll() async throws(Failure) {
         try await mutate { table throws(Failure) in
             table.removeAll()
+        }
+    }
+
+    /// Sets where the item stored under `key` is, such as after the app saved it under a new
+    /// name or learned its path some other way.
+    ///
+    /// For a record with a bookmark it's a hint for display and re-grant prompts until the
+    /// bookmark next resolves, which sets it to where the item really is. For a path-only
+    /// record it's where the store looks for the item from now on: its identity is read
+    /// again and its status becomes ``RecordStatus/unknown``. Unless ``StorePolicy/duplicates``
+    /// is ``DuplicateHandling/allow``, pointing a path-only record at an item stored under
+    /// another key fails with ``BookmarkStoreError/duplicate(of:)``, as re-granting does.
+    @discardableResult
+    public func updateLastKnownPath(_ key: Key, to url: URL) async throws(Failure) -> Record {
+        try await load()
+        let url = url.standardizedFileURL
+        let (identity, isCaseSensitive) = await inspect(url)
+        let location = NormalizedPath(url, isCaseSensitive: isCaseSensitive)
+        let path = location.string
+        return try await mutate { [policy] table throws(Failure) in
+            if policy.duplicates != .allow, table[key]?.hasBookmark == false,
+               let other = table.duplicate(of: identity, path: location, excluding: key) {
+                throw .duplicate(of: other.key)
+            }
+            guard let record = table.setLastKnownPath(key, to: path, identity: identity) else { throw .notFound(key) }
+            return record
+        }
+    }
+
+    /// Records that the item stored under `key` was used now, such as when the app opened it
+    /// without a lease, and moves it to the front of a most-recently-used order.
+    public func markUsed(_ key: Key) async throws(Failure) {
+        let date = now()
+        try await mutate { [policy] table throws(Failure) in
+            guard table.markUsed(key, at: date, ordering: policy.ordering) else { throw .notFound(key) }
+        }
+    }
+
+    /// Pins or unpins the record for `key`. Eviction keeps a pinned record while its item isn't
+    /// gone; see ``EvictionPolicy``.
+    public func setPinned(_ isPinned: Bool, for key: Key) async throws(Failure) {
+        try await mutate { table throws(Failure) in
+            guard table.setPinned(key, isPinned) else { throw .notFound(key) }
         }
     }
 
@@ -379,11 +539,13 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     /// A lease on the item stored under `key`, resolving and refreshing the bookmark if needed.
     ///
     /// While any lease for `key` is active, further leases share its access without resolving
-    /// again.
+    /// again. A path-only record gets a bookmark first, which fails unless the app can reach
+    /// the item; see ``add(pathOnly:key:metadata:)``.
     public func lease(_ key: Key) async throws(Failure) -> AccessLease {
         try await load()
         if let lease = registry.activeLease(for: key) {
-            await touch(key)
+            // The use began with the access this lease joins, so only the order may change.
+            await touch(key, recordingUse: false)
             return lease
         }
         for _ in 0..<3 {
@@ -469,22 +631,31 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     // MARK: - Checking
 
     /// Checks whether the item stored under `key` is reachable, without mounting, UI or access.
+    ///
+    /// For a path-only record, checks whether an item exists at its last known path. A path
+    /// that can't be inspected reads as ``Availability/unknown``, and so does one where nothing
+    /// is found inside the App Sandbox, since it may be missing or merely out of reach.
     public func availability(_ key: Key) async throws(Failure) -> Availability {
         try await load()
         guard let record = table[key] else { throw .notFound(key) }
-        return await service.availability(of: record.data, kind: record.kind)
+        guard let data = record.data else { return await availability(ofPath: record.lastKnownPath) }
+        return await service.availability(of: data, kind: record.kind, document: nil, identity: record.fileIdentity)
     }
 
-    /// Resolves records that aren't known to be available and updates their status.
+    /// Resolves records that aren't known to be available, or every record, and updates their
+    /// status and last known path.
     ///
-    /// Call it when a volume mounts or the app becomes active. Cancelling the calling task
-    /// stops it before the next record, throwing ``BookmarkFailure/cancelled``.
+    /// Call it when a volume mounts or the app becomes active, and with `includingAvailable`
+    /// before relying on statuses, such as before evicting gone items: a record stays
+    /// ``RecordStatus/available`` after its item is deleted until it's resolved again.
+    /// Path-only records get a bookmark when one can be made. Cancelling the calling task stops
+    /// it before the next record, throwing ``BookmarkFailure/cancelled``.
     ///
     /// - Returns: The keys that resolved, including ones whose new status failed to save.
     @discardableResult
-    public func refreshStatuses() async throws(Failure) -> [Key] {
+    public func refreshStatuses(includingAvailable: Bool = false) async throws(Failure) -> [Key] {
         try await load()
-        let candidates = table.order.compactMap { table.snapshot($0) }.filter { $0.record.status != .available }
+        let candidates = table.order.compactMap { table.snapshot($0) }.filter { includingAvailable || $0.record.status != .available }
         var recovered: [Key] = []
         for snapshot in candidates {
             guard !Task.isCancelled else { throw .bookmark(BookmarkError(.cancelled)) }
@@ -552,7 +723,20 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         let task = Task {
             let result: Result<ResolvedBookmark, BookmarkError>
             do throws(BookmarkError) {
-                result = .success(try await service.resolve(record.data, kind: record.kind, policy: policy))
+                if let data = record.data {
+                    result = .success(try await service.resolve(
+                        data,
+                        kind: record.kind,
+                        document: nil,
+                        identity: record.fileIdentity,
+                        policy: policy
+                    ))
+                } else if record.kind == .implicit, service.environment.supportsSecurityScope {
+                    // Such a record can only have been stored elsewhere, since stores don't make one.
+                    throw BookmarkError(.unsupported(reason: Self.persistedImplicitReason))
+                } else {
+                    result = .success(try await service.bookmark(pathOnly: record.lastKnownPath, kind: record.kind))
+                }
             } catch {
                 result = .failure(error)
                 if error.failure != .cancelled {
@@ -571,8 +755,9 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             originalData: resolved.originalData,
             refreshedData: resolved.refreshedData,
             path: NormalizedPath(resolved.url).string,
-            identity: identity,
-            date: now()
+            identity: identity ?? resolved.fileIdentity,
+            date: now(),
+            madeKind: snapshot.record.hasBookmark ? nil : resolved.kind
         )
         do {
             return try await mutate { table throws(Failure) in
@@ -600,13 +785,20 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         }
     }
 
-    /// Moves `key` to the front of a most-recently-used order. The lease it follows stands
-    /// either way, so a failed save only leaves the order as it was.
-    private func touch(_ key: Key) async {
-        guard policy.ordering == .mostRecentlyUsed, table.order.first != key else { return }
+    /// Moves `key` to the front of a most-recently-used order and, when `recordingUse` and the
+    /// policy asks, records its use. The lease it follows stands either way, so a failed save
+    /// only leaves the record as it was.
+    private func touch(_ key: Key, recordingUse: Bool = true) async {
+        let recordsUse = recordingUse && policy.recordsLastUse
+        guard recordsUse || (policy.ordering == .mostRecentlyUsed && table.order.first != key) else { return }
+        let date = now()
         do {
             try await mutate { [policy] table throws(Failure) in
-                table.promote(key, ordering: policy.ordering)
+                if recordsUse {
+                    _ = table.markUsed(key, at: date, ordering: policy.ordering)
+                } else {
+                    table.promote(key, ordering: policy.ordering)
+                }
             }
         } catch {
             Log.store.error("Saving the order of recent bookmarks failed: \(String(describing: error), privacy: .private)")
@@ -636,15 +828,40 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     /// Loads the records and describes them for validators, relinquishing `grant` on failure.
     private func prepare(_ grant: Grant, excluding key: Key) async throws(Failure) -> ValidationContext {
         do throws(Failure) {
-            if kind == .implicit, service.environment.supportsSecurityScope {
-                throw .bookmark(BookmarkError(.unsupported(reason: Self.persistedImplicitReason)))
-            }
+            try checkPersistableKind()
             try await load()
             return ValidationContext(existingPaths: table.paths(excluding: key))
         } catch {
             service.relinquish(grant)
             throw error
         }
+    }
+
+    private func checkPersistableKind() throws(Failure) {
+        if kind == .implicit, service.environment.supportsSecurityScope {
+            throw .bookmark(BookmarkError(.unsupported(reason: Self.persistedImplicitReason)))
+        }
+    }
+
+    /// Whether an item exists at `path`, for a record that has no bookmark to resolve.
+    private func availability(ofPath path: String) async -> Availability {
+        let engine = service.engine
+        let classifier = service.classifier
+        let isSandboxed = service.environment.isSandboxed
+        let availability = try? await service.executor.run(timeout: service.timeout) { () -> Availability in
+            switch engine.itemExists(atPath: path) {
+            case true?: return .available
+            // An item that can't be inspected, such as one behind privacy settings, may exist.
+            case nil: return .unknown
+            case false?: break
+            }
+            let failure = classifier.classify(CocoaError(.fileNoSuchFile), recorded: RecordedValues(locating: path))
+            if case .volumeUnavailable = failure {
+                return Availability(failure)
+            }
+            return isSandboxed ? .unknown : Availability(failure)
+        }
+        return availability ?? .unknown
     }
 
     private static var persistedImplicitReason: String {
@@ -675,11 +892,11 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         return try await writes.withLock { () async throws(Failure) in
             let base = table
             var (result, draft) = try await applyToStored(base, body)
-            let (changes, invalidated) = draft.takeChanges(since: base)
+            let changes = draft.takeChanges(since: base)
             table = draft
             // Published before the lock is released, so subscribers see changes in the order
             // they were saved.
-            finish(changes, invalidating: invalidated)
+            publish(changes)
             return result
         }
     }
@@ -722,13 +939,25 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         return try outcome.get()
     }
 
-    private nonisolated func finish(_ changes: [StoreChange<Key, Metadata>], invalidating keys: Set<Key>) {
-        keys.forEach(registry.detach)
-        guard !changes.isEmpty else { return }
+    /// Publishes the table as it is now: the snapshot first, then the changes and evictions.
+    private func publish(_ changes: Table.Changes) {
+        changes.invalidated.forEach(registry.detach)
+        guard !changes.changes.isEmpty || !changes.evictions.isEmpty else { return }
+        publishSnapshot()
         let continuations = observers.withLock { Array($0.values) }
         for continuation in continuations {
-            changes.forEach { continuation.yield(.change($0)) }
+            changes.changes.forEach { continuation.yield(.change($0)) }
         }
+        guard !changes.evictions.isEmpty else { return }
+        let evictionContinuations = evictionObservers.withLock { Array($0.values) }
+        for continuation in evictionContinuations {
+            changes.evictions.forEach { continuation.yield($0) }
+        }
+    }
+
+    private func publishSnapshot() {
+        let snapshot = StoreSnapshot(records: table.orderedRecords, isLoaded: true)
+        published.withLock { $0 = snapshot }
     }
 
     private func loadFromPersistence() async -> Result<[Record], PersistenceError> {
@@ -747,6 +976,12 @@ extension BookmarkStore where Key == BookmarkID {
     public func add(_ grant: Grant, metadata: Metadata) async throws(Failure) -> Record {
         try await add(grant, key: BookmarkID(), metadata: metadata)
     }
+
+    /// Stores `url` without a bookmark under a new identifier. See ``add(pathOnly:key:metadata:)``.
+    @discardableResult
+    public func add(pathOnly url: URL, metadata: Metadata) async throws(Failure) -> Record {
+        try await add(pathOnly: url, key: BookmarkID(), metadata: metadata)
+    }
 }
 
 extension BookmarkStore where Metadata == NoMetadata {
@@ -760,6 +995,12 @@ extension BookmarkStore where Metadata == NoMetadata {
     public func addAndLease(_ grant: Grant, key: Key) async throws(Failure) -> (record: Record, lease: AccessLease) {
         try await addAndLease(grant, key: key, metadata: NoMetadata())
     }
+
+    /// Stores `url` without a bookmark under `key`. See ``add(pathOnly:key:metadata:)``.
+    @discardableResult
+    public func add(pathOnly url: URL, key: Key) async throws(Failure) -> Record {
+        try await add(pathOnly: url, key: key, metadata: NoMetadata())
+    }
 }
 
 extension BookmarkStore where Key == BookmarkID, Metadata == NoMetadata {
@@ -767,5 +1008,48 @@ extension BookmarkStore where Key == BookmarkID, Metadata == NoMetadata {
     @discardableResult
     public func add(_ grant: Grant) async throws(Failure) -> Record {
         try await add(grant, key: BookmarkID(), metadata: NoMetadata())
+    }
+
+    /// Stores `url` without a bookmark under a new identifier. See ``add(pathOnly:key:metadata:)``.
+    @discardableResult
+    public func add(pathOnly url: URL) async throws(Failure) -> Record {
+        try await add(pathOnly: url, key: BookmarkID(), metadata: NoMetadata())
+    }
+}
+
+extension BookmarkService {
+    /// Makes a bookmark of `kind` for the item at `path`, which the app must reach already,
+    /// and resolves it: the step that gives a path-only record its bookmark.
+    ///
+    /// A missing item on a volume that isn't mounted fails with
+    /// ``BookmarkFailure/volumeUnavailable(name:)``.
+    func bookmark(pathOnly path: String, kind: BookmarkKind) async throws(BookmarkError) -> ResolvedBookmark {
+        // The system started nothing for an item the app already reaches, so there's no start
+        // for the grant to balance.
+        let grant = Grant(url: URL(filePath: path), origin: .alreadyAccessible, platform: environment.platform) { _ in }
+        do {
+            return try await adopt(grant, kind: kind)
+        } catch where error.failure == .missing {
+            let classifier = classifier
+            let failure = try await run { () throws(BookmarkError) -> BookmarkFailure in
+                classifier.classify(CocoaError(.fileNoSuchFile), recorded: RecordedValues(locating: path))
+            }
+            throw BookmarkError(failure, lastKnownPath: path, underlying: error.underlying)
+        }
+    }
+}
+
+extension RecordedValues {
+    /// What a bookmark to `path` would record about the item's volume: one mounted under
+    /// `/Volumes`, or the boot volume.
+    init(locating path: String) {
+        let components = NormalizedPath(path).components
+        let volume = components.count >= 2 && components[0] == "Volumes" ? components[1] : nil
+        self.init(
+            path: path,
+            name: components.last,
+            volumePath: volume.map { "/Volumes/\($0)" },
+            volumeName: volume
+        )
     }
 }
