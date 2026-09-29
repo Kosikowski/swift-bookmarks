@@ -108,7 +108,7 @@ struct RecordTable<Key: Hashable & Sendable, Metadata: Sendable & Equatable>: Se
 
     mutating func replaceItem(
         of key: Key,
-        data: BookmarkData,
+        data: BookmarkData?,
         kind: BookmarkKind,
         path: String,
         identity: FileIdentity?,

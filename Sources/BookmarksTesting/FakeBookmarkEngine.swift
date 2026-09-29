@@ -159,8 +159,8 @@ public final class FakeBookmarkEngine: FileSystemEngine {
         state.withLock { $0.creationFailures[path] = ScriptedFailure(error: error, times: times) }
     }
 
-    /// Removes scripted resolution, creation and replacement failures and refused access, for
-    /// `path` or, when `path` is `nil`, for every path.
+    /// Removes scripted resolution, creation and replacement failures, refused access and
+    /// refused inspection, for `path` or, when `path` is `nil`, for every path.
     ///
     /// Forced staleness, holds and the file system are left as they are.
     public func clearScriptedFailures(of path: String? = nil) {
@@ -170,12 +170,14 @@ public final class FakeBookmarkEngine: FileSystemEngine {
                 state.creationFailures.removeAll()
                 state.replacementFailures.removeAll()
                 state.refused.removeAll()
+                state.uninspectable.removeAll()
                 return
             }
             state.resolutionFailures[path] = nil
             state.creationFailures[path] = nil
             state.replacementFailures[path] = nil
             state.refused.remove(path)
+            state.uninspectable.remove(path)
         }
     }
 
@@ -187,6 +189,13 @@ public final class FakeBookmarkEngine: FileSystemEngine {
     /// Makes `startAccessing` return `false` for `path`.
     public func refuseAccess(to path: String) {
         state.withLock { _ = $0.refused.insert(path) }
+    }
+
+    /// Makes `path` and everything inside it impossible to inspect, as a folder protected by
+    /// privacy settings or permissions is: ``itemInfo(at:)`` returns `nil` and
+    /// ``itemExists(atPath:)`` can't tell.
+    public func refuseInspection(of path: String) {
+        state.withLock { _ = $0.uninspectable.insert(path) }
     }
 
     /// Blocks the next resolution of a bookmark to `path` until the returned gate opens.
@@ -452,7 +461,20 @@ public final class FakeBookmarkEngine: FileSystemEngine {
     }
 
     public func itemExists(atPath path: String) -> Bool? {
-        state.withLock { $0.item(at: path.trimmingTrailingSlashes) != nil }
+        let path = path.trimmingTrailingSlashes
+        return state.withLock { state in
+            state.isUninspectable(path) ? nil : state.item(at: path) != nil
+        }
+    }
+
+    public func itemExists(withIdentity identity: FileIdentity) -> Bool? {
+        state.withLock { state in
+            guard state.mountedVolumes.contains(identity.volumeUUID), !state.volumesWithoutUUID.contains(identity.volumeUUID) else {
+                return nil
+            }
+            guard let path = state.path(ofItem: identity.fileID) else { return false }
+            return state.isUninspectable(path) ? nil : FakeFileSystem.volume(of: path) == identity.volumeUUID
+        }
     }
 
     public func namesAreCaseSensitive(at url: URL) -> Bool {
@@ -463,7 +485,7 @@ public final class FakeBookmarkEngine: FileSystemEngine {
     public func itemInfo(at url: URL) -> ItemInfo? {
         let path = url.fakePath
         return state.withLock { state in
-            guard let item = state.item(at: path) else { return nil }
+            guard !state.isUninspectable(path), let item = state.item(at: path) else { return nil }
             let canonical = state.canonicalPath(path)
             // Like the system, a link describes itself, not its target.
             return ItemInfo(

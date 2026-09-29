@@ -69,6 +69,14 @@ public protocol ItemInspecting: Sendable {
     /// its "no such file" answer counts as absent.
     func itemExists(atPath path: String) -> Bool?
 
+    /// Whether the item with `identity` still exists anywhere on its volume, or `nil` when
+    /// that can't be told, such as when the volume isn't mounted or the sandbox refuses to look.
+    ///
+    /// Tells an item that moved from one that was deleted when its bookmark can't say, as a
+    /// scoped bookmark whose key doesn't match can't inside the App Sandbox. The default
+    /// implementation asks `fsgetpath` on macOS and can't tell elsewhere.
+    func itemExists(withIdentity identity: FileIdentity) -> Bool?
+
     /// Whether names on the volume that holds `url` differ by case.
     ///
     /// When nothing exists at `url`, its nearest existing ancestor decides. Return `true` when
@@ -84,6 +92,27 @@ extension ItemInspecting {
             return true
         }
         return errno == ENOENT || errno == ENOTDIR ? false : nil
+    }
+
+    public func itemExists(withIdentity identity: FileIdentity) -> Bool? {
+        #if os(macOS)
+        let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeUUIDStringKey], options: []) ?? []
+        guard let volume = volumes.first(where: {
+            (try? $0.resourceValues(forKeys: [.volumeUUIDStringKey]))?.volumeUUIDString == identity.volumeUUID
+        }) else {
+            return nil
+        }
+        var info = statfs()
+        guard statfs(volume.path(percentEncoded: false), &info) == 0 else { return nil }
+        var fsid = info.f_fsid
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        if fsgetpath(&buffer, buffer.count, &fsid, identity.fileID) >= 0 {
+            return true
+        }
+        return errno == ENOENT ? false : nil
+        #else
+        return nil
+        #endif
     }
 }
 

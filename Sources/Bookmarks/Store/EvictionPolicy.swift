@@ -61,10 +61,7 @@ public struct EvictionCandidate: Sendable, Hashable {
     /// Whether the item is gone as far as the store knows: missing, recording nothing, or in a
     /// Trash. Matches ``BookmarkRecord/isGone``.
     public var isGone: Bool {
-        switch status.failure {
-        case .missing?, .corrupt?: true
-        default: isInTrash
-        }
+        status.isGone(lastSeenAt: lastKnownPath)
     }
 
     /// When the item was last used, or stored when that isn't known.

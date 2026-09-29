@@ -133,6 +133,26 @@ struct RecordFieldsTests {
         #expect(object["lastKnownPath"] as? String == "/Users/me/A")
     }
 
+    @Test func aPathOnlyRecordHasNoBytes() throws {
+        let pathOnly = TestRecord(key: "a", data: nil, kind: .appScoped(.readWrite), lastKnownPath: "/Users/me/A", createdAt: Self.date, metadata: Tag(name: "a"))
+
+        #expect(pathOnly.data == nil)
+        #expect(!pathOnly.hasBookmark)
+        #expect(Self.record(data: Data()).data == nil, "empty bytes are no bookmark")
+        #expect(Self.record(data: Data()) == pathOnly)
+    }
+
+    @Test func emptyStoredBytesDecodeAsNoBookmark() throws {
+        let encoded = try JSONEncoder().encode(Self.record())
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["data"] = ""
+
+        let decoded = try JSONDecoder().decode(TestRecord.self, from: JSONSerialization.data(withJSONObject: object))
+
+        #expect(decoded.data == nil)
+        #expect(!decoded.hasBookmark)
+    }
+
     @Test func recordsWithABookmarkKeepTheirData() throws {
         #expect(try Self.object(Self.record())["data"] as? String == Data([1, 2]).base64EncodedString())
     }

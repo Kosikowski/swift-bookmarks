@@ -22,6 +22,16 @@ public enum RecordStatus: Sendable, Hashable, Codable {
     public var failure: BookmarkFailure? {
         if case .unavailable(let failure, _) = self { failure } else { nil }
     }
+
+    /// Whether an item with this status, last seen at `path`, is gone: it no longer exists,
+    /// its bookmark records nothing, or it was last seen in a Trash. The one definition behind
+    /// ``BookmarkRecord/isGone`` and ``EvictionCandidate/isGone``.
+    func isGone(lastSeenAt path: String) -> Bool {
+        switch failure {
+        case .missing?, .corrupt?: true
+        default: NormalizedPath(path).isInTrash
+        }
+    }
 }
 
 extension RecordStatus {
@@ -64,14 +74,14 @@ extension RecordStatus {
 /// A stored bookmark with its key, kind, what the store knows about it, and app metadata.
 ///
 /// A record can also be path-only: it holds no bookmark, because none could be made or the app
-/// knows the item only by its path, and ``data`` is empty. The store finds such an item by
+/// knows the item only by its path, and ``data`` is `nil`. The store finds such an item by
 /// ``lastKnownPath`` alone and makes a bookmark for it as soon as it can; see
 /// ``BookmarkStore/add(pathOnly:key:metadata:)``.
 public struct BookmarkRecord<Key: Hashable & Sendable, Metadata: Sendable>: Sendable {
     /// The app's stable identifier. Never changes through refreshes and re-grants.
     public let key: Key
-    /// The bookmark bytes, or empty bytes for a path-only record.
-    public var data: BookmarkData
+    /// The bookmark bytes, or `nil` for a path-only record.
+    public var data: BookmarkData?
     /// The kind the bytes were created with. For a path-only record, the kind its bookmark
     /// will be created with.
     public var kind: BookmarkKind
@@ -91,7 +101,8 @@ public struct BookmarkRecord<Key: Hashable & Sendable, Metadata: Sendable>: Send
     /// When the bytes were last replaced by a refresh or a re-grant.
     public var refreshedAt: Date?
     /// When the item was last used: added, re-granted, marked used with
-    /// ``BookmarkStore/markUsed(_:)``, or leased when ``StorePolicy/recordsLastUse`` is set.
+    /// ``BookmarkStore/markUsed(_:)``, or leased when ``StorePolicy/recordsLastUse`` is set,
+    /// except by a lease that joins one already active.
     /// `nil` for records stored before this was recorded.
     public var lastUsedAt: Date?
     /// Whether eviction keeps the record while its item isn't gone, however long it's unused.
@@ -100,10 +111,10 @@ public struct BookmarkRecord<Key: Hashable & Sendable, Metadata: Sendable>: Send
     /// App-specific data stored with the bookmark.
     public var metadata: Metadata
 
-    /// Creates a record. Pass empty `data` for a path-only record.
+    /// Creates a record. Pass `nil` data for a path-only record; empty bytes count as `nil`.
     public init(
         key: Key,
-        data: BookmarkData,
+        data: BookmarkData?,
         kind: BookmarkKind,
         lastKnownPath: String,
         fileIdentity: FileIdentity? = nil,
@@ -115,7 +126,7 @@ public struct BookmarkRecord<Key: Hashable & Sendable, Metadata: Sendable>: Send
         metadata: Metadata
     ) {
         self.key = key
-        self.data = data
+        self.data = data.flatMap { $0.isEmpty ? nil : $0 }
         self.kind = kind
         self.lastKnownPath = lastKnownPath
         self.fileIdentity = fileIdentity
@@ -134,7 +145,7 @@ public struct BookmarkRecord<Key: Hashable & Sendable, Metadata: Sendable>: Send
 
     /// Whether the record holds a bookmark. `false` for a path-only record.
     public var hasBookmark: Bool {
-        !data.isEmpty
+        data != nil
     }
 
     /// Whether the item was last seen in a Trash: a `.Trash` folder, as in the home folder and
@@ -150,10 +161,7 @@ public struct BookmarkRecord<Key: Hashable & Sendable, Metadata: Sendable>: Send
     /// so they don't count. The status is what the store learned when it last resolved the
     /// item; ``BookmarkStore/refreshStatuses(includingAvailable:)`` brings it up to date.
     public var isGone: Bool {
-        switch status.failure {
-        case .missing?, .corrupt?: true
-        default: isInTrash
-        }
+        status.isGone(lastSeenAt: lastKnownPath)
     }
 }
 
@@ -171,7 +179,7 @@ extension BookmarkRecord: Codable where Key: Codable, Metadata: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         key = try container.decode(Key.self, forKey: .key)
         // A path-only record has no bytes.
-        data = try container.decodeIfPresent(BookmarkData.self, forKey: .data) ?? BookmarkData(Data())
+        data = try container.decodeIfPresent(BookmarkData.self, forKey: .data).flatMap { $0.isEmpty ? nil : $0 }
         kind = try container.decode(BookmarkKind.self, forKey: .kind)
         lastKnownPath = try container.decode(String.self, forKey: .lastKnownPath)
         // Identities without a volume UUID, as earlier versions wrote them, aren't unique.
@@ -190,9 +198,7 @@ extension BookmarkRecord: Codable where Key: Codable, Metadata: Codable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(key, forKey: .key)
-        if hasBookmark {
-            try container.encode(data, forKey: .data)
-        }
+        try container.encodeIfPresent(data, forKey: .data)
         try container.encode(kind, forKey: .kind)
         try container.encode(lastKnownPath, forKey: .lastKnownPath)
         try container.encodeIfPresent(fileIdentity, forKey: .fileIdentity)

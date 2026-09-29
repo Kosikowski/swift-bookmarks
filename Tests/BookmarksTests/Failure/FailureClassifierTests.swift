@@ -66,6 +66,24 @@ struct FailureClassifierTests {
         #expect(FailureClassifier(isVolumeMounted: { _ in false }, itemExists: { _ in false }).classify(cocoa(.fileReadCorruptFile), recorded: onVolume) == .volumeUnavailable(name: "Backup"))
     }
 
+    @Test func aRejectedBookmarkToAnItemThatMovedNeedsARegrant() {
+        let moved = FileIdentity(volumeUUID: "V", fileID: 1)
+        let deleted = FileIdentity(volumeUUID: "V", fileID: 2)
+        let unknown = FileIdentity(volumeUUID: "V", fileID: 3)
+        let classifier = FailureClassifier(
+            isVolumeMounted: { $0 == "/" },
+            itemExists: { _ in false },
+            identityExists: { $0 == moved ? true : $0 == deleted ? false : nil }
+        )
+        let recorded = RecordedValues(path: "/Users/me/Old")
+
+        #expect(classifier.classify(cocoa(.fileReadCorruptFile), recorded: recorded, identity: moved) == .needsRegrant)
+        #expect(classifier.classify(cocoa(.fileReadCorruptFile), recorded: recorded, identity: deleted) == .missing)
+        #expect(classifier.classify(cocoa(.fileReadCorruptFile), recorded: recorded, identity: unknown) == .missing)
+        #expect(classifier.classify(cocoa(.fileReadCorruptFile), recorded: recorded) == .missing)
+        #expect(classifier.classify(cocoa(.fileNoSuchFile), recorded: recorded, identity: moved) == .missing, "only a rejected bookmark is in doubt")
+    }
+
     @Test func regrantWhenReadableBytesAreRejected() {
         let recorded = RecordedValues(path: "/Users/me/Folder")
 

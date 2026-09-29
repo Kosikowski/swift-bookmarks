@@ -4,13 +4,22 @@ struct FailureClassifier: Sendable {
     let isVolumeMounted: @Sendable (String) -> Bool
     /// Whether an item exists at a path, `nil` when that can't be told.
     let itemExists: @Sendable (String) -> Bool?
+    /// Whether the item with an identity exists anywhere, `nil` when that can't be told.
+    let identityExists: @Sendable (FileIdentity) -> Bool?
 
-    init(isVolumeMounted: @escaping @Sendable (String) -> Bool, itemExists: @escaping @Sendable (String) -> Bool? = { _ in nil }) {
+    init(
+        isVolumeMounted: @escaping @Sendable (String) -> Bool,
+        itemExists: @escaping @Sendable (String) -> Bool? = { _ in nil },
+        identityExists: @escaping @Sendable (FileIdentity) -> Bool? = { _ in nil }
+    ) {
         self.isVolumeMounted = isVolumeMounted
         self.itemExists = itemExists
+        self.identityExists = identityExists
     }
 
-    func classify(_ error: any Error, recorded: RecordedValues?) -> BookmarkFailure {
+    /// - Parameter identity: The item's identity as last known, which tells an item that moved
+    ///   from a deleted one when the error alone can't.
+    func classify(_ error: any Error, recorded: RecordedValues?, identity: FileIdentity? = nil) -> BookmarkFailure {
         let error = error as NSError
         switch (error.domain, error.code) {
         case (NSCocoaErrorDomain, NSFileNoSuchFileError),
@@ -20,8 +29,12 @@ struct FailureClassifier: Sendable {
             guard let recorded else { return .corrupt }
             // Inside the App Sandbox, a security-scoped bookmark to an item that was deleted
             // fails with this code too, not with NSFileNoSuchFileError. Nothing at the recorded
-            // path tells a deleted item from a scope key that doesn't match.
+            // path tells a deleted item from a scope key that doesn't match, unless the item
+            // moved: then its identity finds it elsewhere, where the system lets us look.
             if let path = recorded.path, itemExists(path) == false {
+                if let identity, identityExists(identity) == true {
+                    return .needsRegrant
+                }
                 return missingOrUnmounted(recorded)
             }
             return .needsRegrant
@@ -32,7 +45,7 @@ struct FailureClassifier: Sendable {
             // Foundation's generic read error: the sandbox's refusal, unless it wraps a more
             // specific error, such as a network volume's timeout.
             if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
-                let nested = classify(underlying, recorded: recorded)
+                let nested = classify(underlying, recorded: recorded, identity: identity)
                 if case .other = nested {
                     return .denied
                 }
@@ -47,7 +60,7 @@ struct FailureClassifier: Sendable {
             return .timedOut
         default:
             if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
-                let nested = classify(underlying, recorded: recorded)
+                let nested = classify(underlying, recorded: recorded, identity: identity)
                 if case .other = nested {
                     return .other(domain: error.domain, code: error.code)
                 }

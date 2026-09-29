@@ -115,6 +115,39 @@ struct FakeBookmarkEngineTests {
             #expect(engine.itemInfo(at: URL(filePath: "/nothing")) == nil)
         }
 
+        @Test func refusedInspectionHidesAnItemAndItsContents() {
+            engine.addItem(at: "/Users/me/Private/A")
+            engine.addItem(at: "/Users/me/Public")
+
+            engine.refuseInspection(of: "/Users/me/Private")
+
+            #expect(engine.itemInfo(at: URL(filePath: "/Users/me/Private")) == nil)
+            #expect(engine.itemInfo(at: URL(filePath: "/Users/me/Private/A")) == nil)
+            #expect(engine.itemExists(atPath: "/Users/me/Private/A") == nil)
+            #expect(engine.itemExists(atPath: "/Users/me/Private/Gone") == nil)
+            #expect(engine.itemExists(atPath: "/Users/me/Public") == true)
+            #expect(engine.itemExists(atPath: "/Users/me/Gone") == false)
+            engine.clearScriptedFailures(of: "/Users/me/Private")
+            #expect(engine.itemExists(atPath: "/Users/me/Private/A") == true)
+            #expect(engine.itemInfo(at: URL(filePath: "/Users/me/Private/A")) != nil)
+        }
+
+        @Test func itemsAreFoundByIdentityWhereverTheyMoved() throws {
+            engine.addItem(at: "/Users/me/A")
+            engine.addItem(at: "/Users/me/B")
+            let moved = try #require(engine.fileIdentity(of: URL(filePath: "/Users/me/A")))
+            let deleted = try #require(engine.fileIdentity(of: URL(filePath: "/Users/me/B")))
+
+            engine.moveItem(from: "/Users/me/A", to: "/Users/me/Elsewhere/A")
+            engine.removeItem(at: "/Users/me/B")
+
+            #expect(engine.itemExists(withIdentity: moved) == true)
+            #expect(engine.itemExists(withIdentity: deleted) == false)
+            #expect(engine.itemExists(withIdentity: FileIdentity(volumeUUID: "/Volumes/Gone", fileID: moved.fileID)) == nil)
+            engine.refuseInspection(of: "/Users/me/Elsewhere")
+            #expect(engine.itemExists(withIdentity: moved) == nil)
+        }
+
         @Test func identitiesNameTheVolume() {
             engine.addItem(at: "/f")
 

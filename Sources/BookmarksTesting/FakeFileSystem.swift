@@ -38,6 +38,7 @@ struct FakeFileSystem: Sendable {
     var unbalancedStops: [String] = []
     var unissuedStarts: [String] = []
     var refused: Set<String> = []
+    var uninspectable: Set<String> = []
 
     var resolutionFailures: [String: ScriptedFailure] = [:]
     var creationFailures: [String: ScriptedFailure] = [:]
@@ -87,6 +88,10 @@ struct FakeFileSystem: Sendable {
 
     func path(ofItem id: UInt64) -> String? {
         items.first { $0.value.id == id && mountedVolumes.contains(Self.volume(of: $0.key)) }?.key
+    }
+
+    func isUninspectable(_ path: String) -> Bool {
+        uninspectable.contains { Self.isDescendant(path, of: $0) }
     }
 
     func hasAccess(to path: String) -> Bool {

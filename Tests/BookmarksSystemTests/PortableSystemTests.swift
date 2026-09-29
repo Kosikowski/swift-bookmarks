@@ -122,6 +122,23 @@ struct ItemExistenceTests {
 
         #expect(engine.itemExists(atPath: locked.appending(path: "Inside").path(percentEncoded: false)) == nil)
     }
+
+    @Test func findsAnItemByIdentityAfterItMoved() throws {
+        defer { sandbox.remove() }
+        let file = try sandbox.makeFile("File.txt", contents: "x")
+        let identity = try #require(engine.fileIdentity(of: file))
+
+        try FileManager.default.moveItem(at: file, to: sandbox.url("Renamed.txt"))
+
+        #if os(macOS)
+        #expect(engine.itemExists(withIdentity: identity) == true)
+        try FileManager.default.removeItem(at: sandbox.url("Renamed.txt"))
+        #expect(engine.itemExists(withIdentity: identity) == false)
+        #else
+        #expect(engine.itemExists(withIdentity: identity) == nil)
+        #endif
+        #expect(engine.itemExists(withIdentity: FileIdentity(volumeUUID: UUID().uuidString, fileID: identity.fileID)) == nil)
+    }
 }
 
 @Suite("System: stores with real files")

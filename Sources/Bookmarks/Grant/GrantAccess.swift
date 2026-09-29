@@ -14,13 +14,19 @@ extension BookmarkService {
     ///
     /// Fails with ``BookmarkFailure/unsupported(reason:)`` when the grant was already adopted,
     /// relinquished or used, or is being adopted.
-    public func beginAccess(to grant: Grant) throws(BookmarkError) -> AccessLease {
+    public func beginAccess(to grant: Grant) async throws(BookmarkError) -> AccessLease {
         guard grant.takeOver() else { throw Self.grantUnavailable }
+        // Asked after the grant is taken over, so a failure can't leave the system's start
+        // unbalanced; a volume that doesn't answer counts as case-sensitive, as elsewhere.
+        let engine = engine
+        let url = grant.url
+        let isCaseSensitive = (try? await run { engine.namesAreCaseSensitive(at: url) }) ?? true
         let handle = ScopeHandle(
-            url: grant.url,
+            url: url,
             engine: engine,
             ledger: ledger,
             access: .readWrite,
+            isCaseSensitive: isCaseSensitive,
             alreadyStarted: grant.isStartedBySystem,
             startsAccess: grant.origin != .alreadyAccessible
         )
@@ -41,7 +47,7 @@ extension BookmarkService {
         to grant: Grant,
         _ body: (URL) async throws -> T
     ) async throws -> T {
-        let lease = try beginAccess(to: grant)
+        let lease = try await beginAccess(to: grant)
         defer { lease.end() }
         return try await body(lease.url)
     }

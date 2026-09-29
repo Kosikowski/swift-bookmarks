@@ -299,17 +299,37 @@ struct StoreEvictionTests {
             #expect(try await harness.store.record("a")?.lastUsedAt == added.lastUsedAt)
         }
 
-        @Test func sharedLeasesRecordUseToo() async throws {
+        @Test func sharedLeasesShareTheUseAndSaveNothing() async throws {
             let harness = StoreHarness(policy: StorePolicy(recordsLastUse: true))
             try await harness.add("a", "/Users/me/a")
             let first = try await harness.store.lease("a")
+            let used = try await harness.store.record("a")?.lastUsedAt
+            let updates = harness.persistence.updateCount
             harness.clock.advance(by: 60)
 
             let second = try await harness.store.lease("a")
 
-            #expect(try await harness.store.record("a")?.lastUsedAt == harness.clock.now)
+            #expect(try await harness.store.record("a")?.lastUsedAt == used)
+            #expect(harness.persistence.updateCount == updates)
             first.end()
             second.end()
+
+            harness.clock.advance(by: 60)
+            try await harness.store.lease("a").end()
+            #expect(try await harness.store.record("a")?.lastUsedAt == harness.clock.now, "a new access is a new use")
+        }
+
+        @Test func sharedLeasesStillMoveARecentsList() async throws {
+            let harness = StoreHarness(policy: StorePolicy(ordering: .mostRecentlyUsed, recordsLastUse: true))
+            try await harness.add("a", "/Users/me/a")
+            let lease = try await harness.store.lease("a")
+            try await harness.add("b", "/Users/me/b")
+
+            let joined = try await harness.store.lease("a")
+
+            #expect(try await harness.store.keys() == ["a", "b"])
+            lease.end()
+            joined.end()
         }
 
         @Test func markingUseMovesARecentsListToo() async throws {
@@ -431,6 +451,23 @@ struct EvictionPolicyTests {
         let candidate = Self.candidate(0, status: .unavailable(failure, since: Self.date))
 
         #expect(candidate.isGone == gone)
+    }
+
+    @Test(arguments: [
+        RecordStatus.unknown,
+        .available,
+        .unavailable(.missing, since: EvictionPolicyTests.date),
+        .unavailable(.corrupt, since: EvictionPolicyTests.date),
+        .unavailable(.needsRegrant, since: EvictionPolicyTests.date),
+        .unavailable(.volumeUnavailable(name: "Disk"), since: EvictionPolicyTests.date),
+    ], ["/Users/me/file", "/Users/me/.Trash/file"])
+    func candidatesAndRecordsAgreeOnWhatIsGone(_ status: RecordStatus, _ path: String) {
+        let record = TestRecord(key: "a", data: BookmarkData(Data("a".utf8)), kind: .appScoped(.readWrite), lastKnownPath: path, status: status, createdAt: Self.date, metadata: Tag(name: "a"))
+        let candidate = EvictionCandidate(record, position: 0, ordering: .insertion)
+
+        #expect(candidate.isGone == record.isGone)
+        #expect(candidate.isInTrash == record.isInTrash)
+        #expect(record.isGone == status.isGone(lastSeenAt: path))
     }
 
     @Test func lastUseFallsBackToCreation() {

@@ -56,7 +56,8 @@ public struct StorePolicy: Sendable {
     /// Which records go when an addition takes the store past ``limit``, and which never do.
     public var eviction: EvictionPolicy
     /// Whether leasing a record updates its ``BookmarkRecord/lastUsedAt``, which costs a
-    /// save per lease. Adding, re-granting and ``BookmarkStore/markUsed(_:)`` always do.
+    /// save per lease. A lease that joins one already active for the record shares its use
+    /// and saves nothing. Adding, re-granting and ``BookmarkStore/markUsed(_:)`` always do.
     public var recordsLastUse: Bool
     /// Checks run on items before they're added or re-granted. Checks that depend on the key
     /// go in ``BookmarkStore/validatorsForKey``.

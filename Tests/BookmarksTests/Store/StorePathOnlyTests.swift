@@ -25,7 +25,7 @@ struct StorePathOnlyTests {
             let record = try await harness.store.add(pathOnly: URL(filePath: "/Users/me/./Notes.md"), key: "a", metadata: Tag(name: "a"))
 
             #expect(!record.hasBookmark)
-            #expect(record.data.isEmpty)
+            #expect(record.data == nil)
             #expect(record.kind == .appScoped(.readWrite))
             #expect(record.lastKnownPath == "/Users/me/Notes.md")
             #expect(record.fileIdentity == identity)
@@ -155,6 +155,50 @@ struct StorePathOnlyTests {
                 #expect(url.path(percentEncoded: false) == "/Users/me/Moved/")
             }
             #expect(harness.engine.calls.creations == 2, "one for the path, one to refresh the stale bookmark")
+        }
+
+        @Test func aLoadedRecordGetsABookmarkOfItsOwnKind() async throws {
+            let stored = TestRecord(
+                key: "a",
+                data: BookmarkData(Data()),
+                kind: .appScoped(.readOnly),
+                lastKnownPath: "/Users/me/Folder",
+                createdAt: Date(timeIntervalSince1970: 0),
+                metadata: Tag(name: "a")
+            )
+            let harness = StoreHarness(records: [stored])
+            harness.engine.addItem(at: "/Users/me/Folder")
+            harness.engine.makeAccessibleWithoutGrant("/Users/me/Folder")
+
+            try await harness.store.lease("a").end()
+
+            #expect(harness.store.kind == .appScoped(.readWrite))
+            #expect(harness.engine.creationRequests.map(\.options) == [BookmarkKind.appScoped(.readOnly).creationOptions])
+            #expect(try await harness.store.record("a")?.kind == .appScoped(.readOnly))
+            #expect(harness.engine.isBalanced, "\(harness.engine.balanceReport)")
+        }
+
+        @Test func aLoadedImplicitRecordGetsNoBookmarkOnTheMac() async throws {
+            let stored = TestRecord(
+                key: "a",
+                data: BookmarkData(Data()),
+                kind: .implicit,
+                lastKnownPath: "/Users/me/Folder",
+                createdAt: Date(timeIntervalSince1970: 0),
+                metadata: Tag(name: "a")
+            )
+            let harness = StoreHarness(records: [stored])
+            harness.engine.addItem(at: "/Users/me/Folder")
+            harness.engine.makeAccessibleWithoutGrant("/Users/me/Folder")
+
+            let error = await #expect(throws: TestStore.Failure.self) { try await harness.store.lease("a") }
+
+            guard case .unsupported? = error?.bookmarkFailure else {
+                Issue.record("Expected unsupported, got \(String(describing: error))")
+                return
+            }
+            #expect(harness.engine.calls.creations == 0)
+            #expect(try await harness.store.record("a")?.hasBookmark == false)
         }
 
         @Test func aFolderTheAppHoldsIsEnough() async throws {
@@ -317,6 +361,15 @@ struct StorePathOnlyTests {
             #expect(try await harness.store.availability("a") == .missing)
         }
 
+        @Test func anItemThatCantBeInspectedIsUnknownOutsideTheSandbox() async throws {
+            let harness = StoreHarness(environment: Fixtures.unsandboxedMac)
+            harness.engine.addItem(at: "/Users/me/Private/A")
+            harness.engine.refuseInspection(of: "/Users/me/Private")
+            _ = try await harness.store.add(pathOnly: URL(filePath: "/Users/me/Private/A"), key: "a", metadata: Tag(name: "a"))
+
+            #expect(try await harness.store.availability("a") == .unknown, "it may well exist")
+        }
+
         @Test func anUnmountedVolumeIsReportedEverywhere() async throws {
             let harness = StoreHarness()
             _ = try await harness.store.add(pathOnly: URL(filePath: "/Volumes/Backup/Builds"), key: "a", metadata: Tag(name: "a"))
@@ -393,6 +446,49 @@ struct StorePathOnlyTests {
             lease.end()
         }
 
+        @Test func anotherRecordsItemIsADuplicate() async throws {
+            try await harness.add("a", "/Users/me/A")
+            _ = try await base.addPathOnly("b", "/Users/me/B")
+
+            let error = await #expect(throws: TestStore.Failure.self) {
+                try await harness.store.updateLastKnownPath("b", to: URL(filePath: "/Users/me/A"))
+            }
+
+            guard case .duplicate(of: "a") = error else {
+                Issue.record("Expected a duplicate, got \(String(describing: error))")
+                return
+            }
+            #expect(try await harness.store.record("b")?.lastKnownPath == "/Users/me/B")
+        }
+
+        @Test func anotherRecordsPathIsADuplicateWithoutAnIdentity() async throws {
+            _ = try await base.addPathOnly("a", "/Users/me/Gone", exists: false)
+            _ = try await base.addPathOnly("b", "/Users/me/B")
+
+            await #expect(throws: TestStore.Failure.self) {
+                try await harness.store.updateLastKnownPath("b", to: URL(filePath: "/Users/me/Gone/"))
+            }
+        }
+
+        @Test func duplicatesAreKeptWhenThePolicyAllowsThem() async throws {
+            let harness = StoreHarness(policy: StorePolicy(duplicates: .allow))
+            try await harness.add("a", "/Users/me/A")
+            _ = try await harness.store.add(pathOnly: URL(filePath: "/Users/me/B"), key: "b", metadata: Tag(name: "b"))
+
+            let record = try await harness.store.updateLastKnownPath("b", to: URL(filePath: "/Users/me/A"))
+
+            #expect(record.lastKnownPath == "/Users/me/A")
+        }
+
+        @Test func aHintForABookmarkIsntADuplicate() async throws {
+            try await harness.add("a", "/Users/me/A")
+            try await harness.add("b", "/Users/me/B")
+
+            let hinted = try await harness.store.updateLastKnownPath("b", to: URL(filePath: "/Users/me/A"))
+
+            #expect(hinted.lastKnownPath == "/Users/me/A", "the bookmark still names its own item")
+        }
+
         @Test func theSamePathSavesNothing() async throws {
             _ = try await base.addPathOnly("a", "/Users/me/A")
             let saves = harness.persistence.saveCount
@@ -429,7 +525,35 @@ struct StorePathOnlyTests {
             #expect(copy.lastUsedAt == record.lastUsedAt)
         }
 
-        @Test func pinningIsntCopied() async throws {
+        @Test func anImplicitStoreOnMacOSRefusesACopiedPathOnlyRecord() async throws {
+            let source = StoreHarness()
+            let record = try await source.store.add(pathOnly: URL(filePath: "/Users/me/A"), key: "a", metadata: Tag(name: "a"))
+            let persistence = InMemoryPersistence<String, Tag>()
+            let implicit = TestStore(persistence: persistence, kind: .implicit, service: Fixtures.service(source.engine))
+
+            let error = await #expect(throws: TestStore.Failure.self) {
+                try await implicit.add(copyOf: record, key: "b", metadata: Tag(name: "b"))
+            }
+
+            guard case .unsupported? = error?.bookmarkFailure else {
+                Issue.record("Expected unsupported, got \(String(describing: error))")
+                return
+            }
+            #expect(try persistence.load().isEmpty)
+        }
+
+        @Test func anImplicitStoreOnIOSTakesACopiedPathOnlyRecord() async throws {
+            let source = StoreHarness(environment: Fixtures.iOS)
+            let record = try await source.store.add(pathOnly: URL(filePath: "/Users/me/A"), key: "a", metadata: Tag(name: "a"))
+
+            let destination = StoreHarness(environment: Fixtures.iOS)
+
+            let copy = try await destination.store.add(copyOf: record, key: "b", metadata: Tag(name: "b"))
+
+            #expect(copy.kind == .implicit)
+        }
+
+        @Test func pinningIsCopied() async throws {
             let source = StoreHarness()
             let record = try await source.add("a", "/Users/me/A")
             try await source.store.setPinned(true, for: "a")
@@ -438,9 +562,53 @@ struct StorePathOnlyTests {
 
             let copy = try await destination.store.add(copyOf: pinned, key: "b", metadata: Tag(name: "b"))
 
-            #expect(pinned.isPinned)
-            #expect(!copy.isPinned)
+            #expect(copy.isPinned)
             #expect(copy.data == record.data)
+            #expect(destination.saved.first?.isPinned == true)
+        }
+
+        @Test func anUnpinnedCopyKeepsThePinOfTheRecordItReplaces() async throws {
+            let source = StoreHarness()
+            let other = try await source.add("x", "/Users/me/X")
+            let destination = StoreHarness()
+            try await destination.add("b", "/Users/me/B")
+            try await destination.store.setPinned(true, for: "b")
+
+            let copy = try await destination.store.add(copyOf: other, key: "b", metadata: Tag(name: "b"))
+
+            #expect(copy.isPinned)
+        }
+
+        @Test func aPinnedCopyPinsTheRecordItMergesInto() async throws {
+            let source = StoreHarness()
+            try await source.add("a", "/Users/me/A")
+            try await source.store.setPinned(true, for: "a")
+            let pinned = try #require(try await source.store.record("a"))
+            let destination = StoreHarness(policy: StorePolicy(duplicates: .returnExisting))
+            destination.engine.addItem(at: "/Users/me/A")
+            _ = try await destination.store.add(pathOnly: URL(filePath: "/Users/me/A"), key: "existing", metadata: Tag(name: "e"))
+
+            let merged = try await destination.store.add(copyOf: pinned, key: "b", metadata: Tag(name: "b"))
+
+            #expect(merged.key == "existing")
+            #expect(merged.isPinned)
+        }
+
+        @Test func aPinnedCopySurvivesEviction() async throws {
+            let source = StoreHarness()
+            try await source.add("a", "/Users/me/A")
+            try await source.store.setPinned(true, for: "a")
+            let pinned = try #require(try await source.store.record("a"))
+            let destination = TestStore(
+                persistence: InMemoryPersistence(),
+                policy: StorePolicy(limit: 1, eviction: .leastRecentlyUsed),
+                service: Fixtures.service(source.engine)
+            )
+            try await destination.add(copyOf: pinned, key: "a", metadata: Tag(name: "a"))
+
+            try await destination.add(source.grant("/Users/me/B"), key: "b", metadata: Tag(name: "b"))
+
+            #expect(try await destination.keys() == ["a", "b"], "the pinned copy is protected")
         }
     }
 }

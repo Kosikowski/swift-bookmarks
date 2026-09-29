@@ -20,6 +20,34 @@ struct StoreFailurePathTests {
         #expect(harness.engine.isBalanced)
     }
 
+    /// Inside the sandbox, a key that doesn't match fails with 259, as a deleted item does.
+    @Test func anItemThatMovedAndLostItsKeyNeedsARegrantAndIsKept() async throws {
+        let harness = StoreHarness(policy: StorePolicy(failureHandling: .dropMissing, limit: 2, eviction: .goneFirst))
+        try await harness.add("a", "/Users/me/A")
+        harness.engine.moveItem(from: "/Users/me/A", to: "/Users/me/Renamed")
+        harness.engine.failResolution(of: "/Users/me/A", with: FakeErrors.corrupt)
+
+        let error = await #expect(throws: TestStore.Failure.self) { try await harness.store.lease("a") }
+
+        #expect(error?.bookmarkFailure == .needsRegrant)
+        let record = try #require(try await harness.store.record("a"))
+        #expect(record.status.failure == .needsRegrant)
+        #expect(!record.isGone)
+        harness.engine.failResolution(of: "/Users/me/A", with: FakeErrors.corrupt)
+        #expect(try await harness.store.availability("a") == .needsRegrant)
+    }
+
+    @Test func aDeletedItemBehindAScopedBookmarkIsStillMissing() async throws {
+        let harness = StoreHarness(policy: StorePolicy(failureHandling: .dropMissing))
+        try await harness.add("a", "/Users/me/A")
+        harness.engine.removeItem(at: "/Users/me/A")
+
+        let error = await #expect(throws: TestStore.Failure.self) { try await harness.store.lease("a") }
+
+        #expect(error?.bookmarkFailure == .missing)
+        #expect(try await harness.store.contains("a") == false)
+    }
+
     @Test func aStatusThatCannotBeSavedIsNotApplied() async throws {
         let harness = StoreHarness()
         try await harness.add("a", "/Users/me/A")

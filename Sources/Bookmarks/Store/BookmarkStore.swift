@@ -274,12 +274,13 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     /// Stores `url` without a bookmark under `key`, replacing any record for `key`.
     ///
     /// Use it for an item the app knows only by its path, or when making a bookmark failed.
-    /// The record holds an empty ``BookmarkRecord/data``, and the store finds the item by
+    /// The record's ``BookmarkRecord/data`` is `nil`, and the store finds the item by
     /// ``BookmarkRecord/lastKnownPath`` alone, so it doesn't follow moves. Leasing the record
-    /// or refreshing statuses makes a bookmark of the store's kind as soon as the app can
-    /// reach the item, such as while it holds access to a folder that contains it; to make one
-    /// from a grant, call ``regrant(_:with:)``. Until then, leasing fails as making the bookmark
-    /// did, such as with ``BookmarkFailure/denied`` inside the App Sandbox.
+    /// or refreshing statuses makes a bookmark of the record's kind, the store's kind when it
+    /// was added, as soon as the app can reach the item, such as while it holds access to a
+    /// folder that contains it; to make one from a grant, call ``regrant(_:with:)``. Until then,
+    /// leasing fails as making the bookmark did, such as with ``BookmarkFailure/denied`` inside
+    /// the App Sandbox.
     ///
     /// Duplicates are handled as by ``add(_:key:metadata:)``, by identity when the item can be
     /// inspected and by path otherwise. Validators don't run, because the item isn't accessed.
@@ -291,7 +292,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         let (identity, isCaseSensitive) = await inspect(url)
         return try await insert(
             Item(
-                data: BookmarkData(Data()),
+                data: nil,
                 kind: kind,
                 location: NormalizedPath(url, isCaseSensitive: isCaseSensitive),
                 identity: identity,
@@ -310,14 +311,16 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     /// so an item that can't be reached now moves too. Validators don't run, because the item
     /// isn't accessed. Duplicates are handled as by ``add(_:key:metadata:)``; with
     /// ``DuplicateHandling/returnExisting`` the existing record takes the copied bytes and
-    /// status.
+    /// status. A pinned record stays pinned, and a copy never unpins a record it replaces or
+    /// merges into. A path-only record gets its bookmark in this store's kind.
     @discardableResult
     public func add<OtherKey, OtherMetadata>(
         copyOf other: BookmarkRecord<OtherKey, OtherMetadata>,
         key: Key,
         metadata: Metadata
     ) async throws(Failure) -> Record {
-        if other.hasBookmark, other.kind == .implicit, service.environment.supportsSecurityScope {
+        let copiedKind = other.hasBookmark ? other.kind : kind
+        if copiedKind == .implicit, service.environment.supportsSecurityScope {
             throw .bookmark(BookmarkError(.unsupported(reason: Self.persistedImplicitReason)))
         }
         try await load()
@@ -325,12 +328,12 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         return try await insert(
             Item(
                 data: other.data,
-                // A path-only record gets its bookmark in this store's kind.
-                kind: other.hasBookmark ? other.kind : kind,
+                kind: copiedKind,
                 location: NormalizedPath(other.lastKnownPath, isCaseSensitive: isCaseSensitive),
                 identity: other.fileIdentity,
                 status: other.status,
-                lastUsedAt: other.lastUsedAt
+                lastUsedAt: other.lastUsedAt,
+                isPinned: other.isPinned
             ),
             key: key,
             metadata: metadata
@@ -338,12 +341,13 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     }
 
     private struct Item: Sendable {
-        let data: BookmarkData
+        let data: BookmarkData?
         let kind: BookmarkKind
         let location: NormalizedPath
         let identity: FileIdentity?
         let status: RecordStatus
         let lastUsedAt: Date?
+        var isPinned = false
     }
 
     private func insert(_ item: Item, key: Key, metadata: Metadata) async throws(Failure) -> Record {
@@ -353,8 +357,11 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
             if policy.duplicates != .allow,
                let existing = table.duplicate(of: item.identity, path: item.location, excluding: key) {
                 guard policy.duplicates == .returnExisting else { throw .duplicate(of: existing.key) }
+                if item.isPinned {
+                    _ = table.setPinned(existing.key, true)
+                }
                 // A path says nothing new about an item the store holds a bookmark for.
-                if item.data.isEmpty, existing.hasBookmark {
+                if item.data == nil, existing.hasBookmark {
                     _ = table.markUsed(existing.key, at: item.lastUsedAt ?? timestamp, ordering: policy.ordering)
                     return table[existing.key] ?? existing
                 }
@@ -381,7 +388,7 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
                 createdAt: previous?.createdAt ?? timestamp,
                 refreshedAt: previous == nil ? nil : timestamp,
                 lastUsedAt: item.lastUsedAt,
-                isPinned: previous?.isPinned ?? false,
+                isPinned: item.isPinned || previous?.isPinned == true,
                 metadata: metadata
             )
             table.put(record, ordering: policy.ordering)
@@ -473,14 +480,21 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     /// For a record with a bookmark it's a hint for display and re-grant prompts until the
     /// bookmark next resolves, which sets it to where the item really is. For a path-only
     /// record it's where the store looks for the item from now on: its identity is read
-    /// again and its status becomes ``RecordStatus/unknown``.
+    /// again and its status becomes ``RecordStatus/unknown``. Unless ``StorePolicy/duplicates``
+    /// is ``DuplicateHandling/allow``, pointing a path-only record at an item stored under
+    /// another key fails with ``BookmarkStoreError/duplicate(of:)``, as re-granting does.
     @discardableResult
     public func updateLastKnownPath(_ key: Key, to url: URL) async throws(Failure) -> Record {
         try await load()
         let url = url.standardizedFileURL
-        let (identity, _) = await inspect(url)
-        let path = NormalizedPath(url).string
-        return try await mutate { table throws(Failure) in
+        let (identity, isCaseSensitive) = await inspect(url)
+        let location = NormalizedPath(url, isCaseSensitive: isCaseSensitive)
+        let path = location.string
+        return try await mutate { [policy] table throws(Failure) in
+            if policy.duplicates != .allow, table[key]?.hasBookmark == false,
+               let other = table.duplicate(of: identity, path: location, excluding: key) {
+                throw .duplicate(of: other.key)
+            }
             guard let record = table.setLastKnownPath(key, to: path, identity: identity) else { throw .notFound(key) }
             return record
         }
@@ -530,7 +544,8 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
     public func lease(_ key: Key) async throws(Failure) -> AccessLease {
         try await load()
         if let lease = registry.activeLease(for: key) {
-            await touch(key)
+            // The use began with the access this lease joins, so only the order may change.
+            await touch(key, recordingUse: false)
             return lease
         }
         for _ in 0..<3 {
@@ -617,14 +632,14 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
 
     /// Checks whether the item stored under `key` is reachable, without mounting, UI or access.
     ///
-    /// For a path-only record, checks whether an item exists at its last known path. Inside
-    /// the App Sandbox, a path the app can't reach may be missing or merely out of reach, so it
-    /// reads as ``Availability/unknown``.
+    /// For a path-only record, checks whether an item exists at its last known path. A path
+    /// that can't be inspected reads as ``Availability/unknown``, and so does one where nothing
+    /// is found inside the App Sandbox, since it may be missing or merely out of reach.
     public func availability(_ key: Key) async throws(Failure) -> Availability {
         try await load()
         guard let record = table[key] else { throw .notFound(key) }
-        guard record.hasBookmark else { return await availability(ofPath: record.lastKnownPath) }
-        return await service.availability(of: record.data, kind: record.kind)
+        guard let data = record.data else { return await availability(ofPath: record.lastKnownPath) }
+        return await service.availability(of: data, kind: record.kind, document: nil, identity: record.fileIdentity)
     }
 
     /// Resolves records that aren't known to be available, or every record, and updates their
@@ -705,14 +720,22 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         let policy = ResolutionPolicy(mounting: policy.mounting, allowsUI: policy.allowsUI)
         let service = service
         let record = snapshot.record
-        let kind = kind
         let task = Task {
             let result: Result<ResolvedBookmark, BookmarkError>
             do throws(BookmarkError) {
-                if record.hasBookmark {
-                    result = .success(try await service.resolve(record.data, kind: record.kind, policy: policy))
+                if let data = record.data {
+                    result = .success(try await service.resolve(
+                        data,
+                        kind: record.kind,
+                        document: nil,
+                        identity: record.fileIdentity,
+                        policy: policy
+                    ))
+                } else if record.kind == .implicit, service.environment.supportsSecurityScope {
+                    // Such a record can only have been stored elsewhere, since stores don't make one.
+                    throw BookmarkError(.unsupported(reason: Self.persistedImplicitReason))
                 } else {
-                    result = .success(try await service.bookmark(pathOnly: record.lastKnownPath, kind: kind))
+                    result = .success(try await service.bookmark(pathOnly: record.lastKnownPath, kind: record.kind))
                 }
             } catch {
                 result = .failure(error)
@@ -762,11 +785,11 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         }
     }
 
-    /// Moves `key` to the front of a most-recently-used order and records its use when the
-    /// policy asks. The lease it follows stands either way, so a failed save only leaves the
-    /// record as it was.
-    private func touch(_ key: Key) async {
-        let recordsUse = policy.recordsLastUse
+    /// Moves `key` to the front of a most-recently-used order and, when `recordingUse` and the
+    /// policy asks, records its use. The lease it follows stands either way, so a failed save
+    /// only leaves the record as it was.
+    private func touch(_ key: Key, recordingUse: Bool = true) async {
+        let recordsUse = recordingUse && policy.recordsLastUse
         guard recordsUse || (policy.ordering == .mostRecentlyUsed && table.order.first != key) else { return }
         let date = now()
         do {
@@ -826,8 +849,11 @@ public actor BookmarkStore<Key: Hashable & Sendable, Metadata: Sendable & Equata
         let classifier = service.classifier
         let isSandboxed = service.environment.isSandboxed
         let availability = try? await service.executor.run(timeout: service.timeout) { () -> Availability in
-            if engine.itemInfo(at: URL(filePath: path)) != nil {
-                return .available
+            switch engine.itemExists(atPath: path) {
+            case true?: return .available
+            // An item that can't be inspected, such as one behind privacy settings, may exist.
+            case nil: return .unknown
+            case false?: break
             }
             let failure = classifier.classify(CocoaError(.fileNoSuchFile), recorded: RecordedValues(locating: path))
             if case .volumeUnavailable = failure {

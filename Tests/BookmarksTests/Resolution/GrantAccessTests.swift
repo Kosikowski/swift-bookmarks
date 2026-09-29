@@ -14,10 +14,10 @@ struct GrantAccessTests {
     }
 
     @Test(arguments: [Grant.Origin.openPanel, .savePanel, .appKitDrop, .swiftUIDrop, .finderOpen, .implicitBookmark])
-    func takesOverTheSystemsStart(_ origin: Grant.Origin) throws {
+    func takesOverTheSystemsStart(_ origin: Grant.Origin) async throws {
         let grant = grant(origin)
 
-        let lease = try service.beginAccess(to: grant)
+        let lease = try await service.beginAccess(to: grant)
 
         #expect(lease.didStartScope)
         #expect(lease.isActive)
@@ -30,10 +30,10 @@ struct GrantAccessTests {
     }
 
     @Test(arguments: [Grant.Origin.fileImporter, .documentPicker])
-    func startsAccessForOriginsTheSystemDoesntStart(_ origin: Grant.Origin) throws {
+    func startsAccessForOriginsTheSystemDoesntStart(_ origin: Grant.Origin) async throws {
         let grant = grant(origin)
 
-        let lease = try service.beginAccess(to: grant)
+        let lease = try await service.beginAccess(to: grant)
 
         #expect(lease.didStartScope)
         #expect(engine.calls.starts == 1)
@@ -44,10 +44,10 @@ struct GrantAccessTests {
         #expect(engine.calls.creations == 0)
     }
 
-    @Test func startsNothingForLocationsTheAppAlreadyReaches() throws {
+    @Test func startsNothingForLocationsTheAppAlreadyReaches() async throws {
         let grant = grant(.alreadyAccessible)
 
-        let lease = try service.beginAccess(to: grant)
+        let lease = try await service.beginAccess(to: grant)
         lease.end()
 
         #expect(!lease.didStartScope)
@@ -55,10 +55,10 @@ struct GrantAccessTests {
         #expect(engine.calls.stops == 0)
     }
 
-    @Test func theLeaseUsesTheGrantedURL() throws {
+    @Test func theLeaseUsesTheGrantedURL() async throws {
         let grant = grant(.fileImporter)
 
-        let lease = try service.beginAccess(to: grant)
+        let lease = try await service.beginAccess(to: grant)
         defer { lease.end() }
 
         #expect(lease.url == grant.url)
@@ -68,10 +68,10 @@ struct GrantAccessTests {
 
     @Test func aGrantIsUsedOnce() async throws {
         let grant = grant(.openPanel)
-        let lease = try service.beginAccess(to: grant)
+        let lease = try await service.beginAccess(to: grant)
         defer { lease.end() }
 
-        let again = #expect(throws: BookmarkError.self) { try service.beginAccess(to: grant) }
+        let again = await #expect(throws: BookmarkError.self) { try await service.beginAccess(to: grant) }
         let adopted = await #expect(throws: BookmarkError.self) { try await service.adopt(grant) }
 
         guard case .unsupported = again?.failure, case .unsupported = adopted?.failure else {
@@ -82,11 +82,11 @@ struct GrantAccessTests {
         #expect(engine.outstandingAccess == ["/Users/me/Folder": 1], "relinquishing a used grant stops nothing")
     }
 
-    @Test func relinquishedGrantsCantBeUsed() {
+    @Test func relinquishedGrantsCantBeUsed() async {
         let grant = grant(.openPanel)
         service.relinquish(grant)
 
-        #expect(throws: BookmarkError.self) { try service.beginAccess(to: grant) }
+        await #expect(throws: BookmarkError.self) { try await service.beginAccess(to: grant) }
         #expect(engine.isBalanced)
     }
 
@@ -97,7 +97,7 @@ struct GrantAccessTests {
 
         let adoption = Task { try await service.adopt(grant) }
         await gate.waitUntilReached()
-        let error = #expect(throws: BookmarkError.self) { try service.beginAccess(to: grant) }
+        let error = await #expect(throws: BookmarkError.self) { try await service.beginAccess(to: grant) }
         gate.open()
         _ = try await adoption.value
 
@@ -108,17 +108,17 @@ struct GrantAccessTests {
         #expect(engine.isBalanced, "\(engine.balanceReport)")
     }
 
-    @Test func aDroppedLeaseEndsItself() throws {
+    @Test func aDroppedLeaseEndsItself() async throws {
         do {
-            _ = try service.beginAccess(to: grant(.openPanel))
+            _ = try await service.beginAccess(to: grant(.openPanel))
         }
 
         #expect(engine.isBalanced, "\(engine.balanceReport)")
     }
 
-    @Test func coveringLeasesJoinTheGrantsAccess() throws {
+    @Test func coveringLeasesJoinTheGrantsAccess() async throws {
         let service = service
-        let lease = try service.beginAccess(to: grant(.fileImporter))
+        let lease = try await service.beginAccess(to: grant(.fileImporter))
 
         let inner = try #require(service.ledger.lease(covering: URL(filePath: "/Users/me/Folder/inner.json")))
         lease.end()
@@ -127,6 +127,28 @@ struct GrantAccessTests {
         #expect(engine.calls.starts == 1)
         inner.end()
         #expect(engine.isBalanced, "\(engine.balanceReport)")
+    }
+
+    @Test func coveringLeasesJoinOnAVolumeThatIgnoresCase() async throws {
+        let service = service
+        engine.makeCaseInsensitive()
+        let lease = try await service.beginAccess(to: grant(.fileImporter))
+        defer { lease.end() }
+
+        let inner = try #require(service.ledger.lease(covering: URL(filePath: "/Users/me/folder/inner.json")))
+        inner.end()
+
+        #expect(engine.calls.starts == 1, "the lease joined the grant's access")
+        #expect(lease.url(forDescendant: URL(filePath: "/users/ME/Folder/inner.json")) != nil)
+    }
+
+    @Test func pathsDifferingInCaseDontJoinOnACaseSensitiveVolume() async throws {
+        let service = service
+        let lease = try await service.beginAccess(to: grant(.fileImporter))
+        defer { lease.end() }
+
+        #expect(service.ledger.lease(covering: URL(filePath: "/Users/me/folder/inner.json")) == nil)
+        #expect(lease.url(forDescendant: URL(filePath: "/Users/me/folder/inner.json")) == nil)
     }
 
     @Suite("withAccess")

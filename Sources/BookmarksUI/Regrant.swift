@@ -18,7 +18,7 @@ extension BookmarkStore {
         fileTypes: [UTType] = [.item]
     ) async throws(Failure) -> PickerConfiguration {
         guard let record = try await record(key) else { throw .notFound(key) }
-        var recorded = service.recordedValues(in: record.data)
+        var recorded = record.data.flatMap(service.recordedValues(in:))
         if recorded == nil {
             let engine = service.engine
             let path = record.lastKnownPath

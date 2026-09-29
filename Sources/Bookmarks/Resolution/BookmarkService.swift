@@ -186,7 +186,8 @@ extension BookmarkService {
         let engine = engine
         return FailureClassifier(
             isVolumeMounted: { engine.isVolumeMounted(atPath: $0) },
-            itemExists: { engine.itemExists(atPath: $0) }
+            itemExists: { engine.itemExists(atPath: $0) },
+            identityExists: { engine.itemExists(withIdentity: $0) }
         )
     }
 
@@ -241,10 +242,13 @@ extension BookmarkService {
         )
     }
 
+    /// - Parameter identity: The item's identity as last known, which tells an item that moved
+    ///   from a deleted one when the failure alone can't.
     func resolve(
         _ data: BookmarkData,
         kind: BookmarkKind,
         document: URL?,
+        identity: FileIdentity? = nil,
         policy: ResolutionPolicy
     ) async throws(BookmarkError) -> ResolvedBookmark {
         try checkSupported(kind, document: document)
@@ -256,6 +260,7 @@ extension BookmarkService {
                 data,
                 kind: kind,
                 document: document,
+                identity: identity,
                 policy: policy,
                 engine: engine,
                 ledger: ledger,
@@ -264,7 +269,7 @@ extension BookmarkService {
         }
     }
 
-    func availability(of data: BookmarkData, kind: BookmarkKind, document: URL?) async -> Availability {
+    func availability(of data: BookmarkData, kind: BookmarkKind, document: URL?, identity: FileIdentity? = nil) async -> Availability {
         do {
             try checkSupported(kind, document: document)
             let engine = engine
@@ -275,7 +280,7 @@ extension BookmarkService {
                     _ = try engine.resolve(data, options: kind.resolutionOptions(.default), relativeTo: document)
                     return .available
                 } catch {
-                    return Availability(classifier.classify(error, recorded: recorded))
+                    return Availability(classifier.classify(error, recorded: recorded, identity: identity))
                 }
             }
         } catch {
@@ -377,6 +382,7 @@ extension BookmarkService {
         _ data: BookmarkData,
         kind: BookmarkKind,
         document: URL?,
+        identity: FileIdentity? = nil,
         policy: ResolutionPolicy,
         engine: any BookmarkEngine & ItemInspecting,
         ledger: ScopeLedger,
@@ -387,7 +393,7 @@ extension BookmarkService {
         do {
             resolution = try engine.resolve(data, options: kind.resolutionOptions(policy), relativeTo: document)
         } catch {
-            let failure = classifier.classify(error, recorded: recorded)
+            let failure = classifier.classify(error, recorded: recorded, identity: identity)
             Log.resolution.debug("Resolution failed: \(failure.caseName, privacy: .public)")
             throw BookmarkError(failure, lastKnownPath: recorded?.path, underlying: error as NSError)
         }
