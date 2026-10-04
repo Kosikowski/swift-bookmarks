@@ -7,7 +7,7 @@ Swift 6, macOS 15 / iOS 18 / visionOS 2 / Mac Catalyst 18.
 ## Installation
 
 ```swift
-.package(url: "https://github.com/Kosikowski/swift-bookmarks.git", from: "0.1.0")
+.package(url: "https://github.com/Kosikowski/swift-bookmarks.git", from: "0.2.1")
 ```
 
 Then add `Bookmarks`, `BookmarksUI` and `BookmarksTesting` to the targets that need them. `BookmarksTesting` belongs in test targets.
@@ -140,6 +140,15 @@ try await store.lease("project").end()
 ```
 
 Script failures with `failResolution(of:with:times:)`, `failCreation` and `failReplacement`, and remove them with `clearScriptedFailures(of:)`. The fake models what the App Sandbox does, including a document's bookmark key: `replaceItem(at:)` is a plain atomic write that loses it, `replaceItem(at:keepingExtendedAttributes: true)` a safe save that keeps it.
+
+## Privacy manifest
+
+An app using the library declares two of Apple's required-reason API categories in its `PrivacyInfo.xcprivacy`:
+
+- `NSPrivacyAccessedAPICategoryFileTimestamp`, reason `3B52.1` (files the user granted access to): to tell whether a bookmarked item still exists, the library calls `lstat` and `getattrlist`.
+- `NSPrivacyAccessedAPICategoryUserDefaults`, reason `CA92.1` (`1C8F.1` for an app group's suite): `UserDefaultsPersistence` and `MigratingPersistence` keep their data in `UserDefaults`. App Store Connect may find the class in the binary even when the app uses neither, so declare it either way.
+
+It uses no other required-reason API.
 
 ## Development
 

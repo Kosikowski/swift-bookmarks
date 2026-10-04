@@ -4,9 +4,10 @@
 
 ### Changed
 
-- `ItemInspecting.itemExists(withIdentity:)` reads the volume's filesystem ID with `getattrlist` (`ATTR_CMN_FSID`) instead of `statfs`. Apple lists `statfs` among the disk-space APIs an app's privacy manifest has to give a reason for, and none of those reasons covers reading a filesystem ID, so an app using the library had no accurate reason to declare. `getattrlist` is in the file timestamp category, which `itemExists(atPath:)`'s `lstat` already puts an app in.
+- `ItemInspecting.itemExists(withIdentity:)` reads the volume's filesystem ID with `getattrlist` (`ATTR_CMN_FSID`) instead of `statfs`. Apple lists `statfs` among the disk-space APIs an app's privacy manifest has to give a reason for, and none of those reasons covers reading a filesystem ID, so an app using the library had no accurate reason to declare. `getattrlist` is in the file timestamp category, which `itemExists(atPath:)`'s `lstat` already puts an app in. The README says what an app declares for the library.
+- The README's installation snippet points at 0.2.1.
 
-## 0.2.0 (unreleased)
+## 0.2.0
 
 What an app needs to keep a history of its documents in a `BookmarkStore`, one-shot use of picked items, re-granting on every platform, and fixes found by running the tests on the iOS simulator and inside the App Sandbox.
 
