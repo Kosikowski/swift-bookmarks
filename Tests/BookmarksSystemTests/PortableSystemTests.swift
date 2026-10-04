@@ -123,6 +123,19 @@ struct ItemExistenceTests {
         #expect(engine.itemExists(atPath: locked.appending(path: "Inside").path(percentEncoded: false)) == nil)
     }
 
+    #if os(macOS)
+    @Test func readsTheFilesystemIDStatfsReports() throws {
+        defer { sandbox.remove() }
+        let path = try sandbox.makeFile("File.txt", contents: "x").path(percentEncoded: false)
+        var info = statfs()
+        try #require(statfs(path, &info) == 0)
+        let fsid = try #require(filesystemID(atPath: path))
+        #expect(fsid.val.0 == info.f_fsid.val.0)
+        #expect(fsid.val.1 == info.f_fsid.val.1)
+        #expect(filesystemID(atPath: sandbox.url("Gone").path(percentEncoded: false)) == nil)
+    }
+    #endif
+
     @Test func findsAnItemByIdentityAfterItMoved() throws {
         defer { sandbox.remove() }
         let file = try sandbox.makeFile("File.txt", contents: "x")
