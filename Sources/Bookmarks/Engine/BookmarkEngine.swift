@@ -102,9 +102,7 @@ extension ItemInspecting {
         }) else {
             return nil
         }
-        var info = statfs()
-        guard statfs(volume.path(percentEncoded: false), &info) == 0 else { return nil }
-        var fsid = info.f_fsid
+        guard var fsid = filesystemID(atPath: volume.path(percentEncoded: false)) else { return nil }
         var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         if fsgetpath(&buffer, buffer.count, &fsid, identity.fileID) >= 0 {
             return true
@@ -115,6 +113,28 @@ extension ItemInspecting {
         #endif
     }
 }
+
+#if os(macOS)
+/// The filesystem ID of the volume that holds `path`, the `fsid_t` `fsgetpath` takes, or `nil`
+/// when it can't be read.
+///
+/// Read with `getattrlist` and `ATTR_CMN_FSID` rather than `statfs`: Apple lists `statfs`
+/// among the disk-space APIs an app's privacy manifest has to declare a reason for, and none
+/// of that category's reasons covers reading a filesystem ID. `getattrlist` is in the file
+/// timestamp category, which `itemExists(atPath:)`'s `lstat` already puts an app in.
+func filesystemID(atPath path: String) -> fsid_t? {
+    var request = attrlist()
+    request.bitmapcount = u_short(ATTR_BIT_MAP_COUNT)
+    request.commonattr = attrgroup_t(ATTR_CMN_FSID)
+    // The reply: its length as a `u_int32_t`, then the `fsid_t`.
+    var reply = [UInt8](repeating: 0, count: MemoryLayout<UInt32>.size + MemoryLayout<fsid_t>.size)
+    let result = reply.withUnsafeMutableBytes { buffer in
+        getattrlist(path, &request, buffer.baseAddress, buffer.count, 0)
+    }
+    guard result == 0 else { return nil }
+    return reply.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: MemoryLayout<UInt32>.size, as: fsid_t.self) }
+}
+#endif
 
 /// Reads and writes Finder alias files.
 public protocol AliasFileAccessing: Sendable {
