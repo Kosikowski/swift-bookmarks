@@ -1,5 +1,7 @@
 # swift-bookmarks
 
+[![Swift versions](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FKosikowski%2Fswift-bookmarks%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/Kosikowski/swift-bookmarks) [![Platforms](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2FKosikowski%2Fswift-bookmarks%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/Kosikowski/swift-bookmarks)
+
 URL bookmarks and security-scoped access for macOS, Mac Catalyst, iOS/iPadOS and visionOS, done once and correctly: every bookmark kind, balanced access, stale refresh inside the scope, typed failures, pluggable storage and test doubles.
 
 Swift 6, macOS 15 / iOS 18 / visionOS 2 / Mac Catalyst 18.
